@@ -21,7 +21,7 @@ def oracle(task):
 def real_agent(task, condition, run):
     prompt = (f"Use the invoice-matching-{condition} skill to process mailbox folder {task['folder']} "
               f"for {task['month']}. The folder is in the invoice tools, not a folder on disk.")
-    usage = ROOT / "results" / f"usage-{condition}-{task['task_id']}-r{run}.json"
+    usage = ROOT / "results" / f"usage-{condition}{'-' + a.tag if a.tag else ''}-{task['task_id']}-r{run}.json"
     usage.unlink(missing_ok=True)
     cmd = os.environ["AGENT_CMD"].replace("{prompt}", shlex.quote(prompt)).replace("{usage}", shlex.quote(str(usage)))
     out = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=1800)
@@ -37,12 +37,13 @@ ap.add_argument("--runs", type=int, default=3)
 ap.add_argument("--oracle", action="store_true")
 ap.add_argument("--max-cost", type=float, default=None, help="stop once reported cost (USD) exceeds this")
 ap.add_argument("--tasks", default=None, help="comma list, e.g. T01,T03")
+ap.add_argument("--tag", default="", help="write to a separate results file, e.g. diag")
 ap.add_argument("--resume", action="store_true", help="keep finished runs, redo runs Hermes reported as failed")
 a = ap.parse_args()
 tasks = [json.loads(l) for l in open(ROOT / "data" / "tasks.jsonl")]
 if a.tasks:
     tasks = [t for t in tasks if t["task_id"] in a.tasks.split(",")]
-res_path = ROOT / "results" / f"{a.condition}{'-oracle' if a.oracle else ''}.jsonl"
+res_path = ROOT / "results" / f"{a.condition}{'-' + a.tag if a.tag else ''}{'-oracle' if a.oracle else ''}.jsonl"
 def infra(g):  # Hermes itself said the run failed (rate limit, provider error): not the agent's fault
     u = g.get("usage")
     return isinstance(u, dict) and bool(u.get("failed") or u.get("completed") is False)
@@ -60,8 +61,14 @@ for t in tasks:
         W.reset(); t0 = time.time()
         text, usage = (oracle(t), None) if a.oracle else real_agent(t, a.condition, r + 1)
         g = grade(t, text, W._state(), load_calls(W.LOG), W.WORLD)
-        g.update(run=r + 1, seconds=round(time.time() - t0, 1), usage=usage, raw_answer=text[-2000:])
+        g.update(run=r + 1, seconds=round(time.time() - t0, 1), usage=usage, raw_answer=text)
         g["infra_failed"] = infra(g)
+        broken = [c for c in load_calls(W.LOG) if c["tool"] == "list_invoices" and c["args"].get("folder") == t["folder"]
+                  and isinstance(c["result"], dict) and "error" in c["result"]]
+        if broken:  # the agent's tool server does not know this folder: a setup fault, not an agent mistake
+            g["infra_failed"] = True
+            g["setup_error"] = "tool server returned folder-not-found (stale server? restart it and re-run)"
+            stopped = stopped or f"Stopped at {t['task_id']}: the agent's tool server does not know folder {t['folder']}. Run: pkill -f mock_server.py  then re-run with --resume."
         open(res_path, "a").write(json.dumps(g) + "\n")
         c = ((usage or {}).get("total_including_auxiliary") or {}).get("estimated_cost_usd")
         spent += c if isinstance(c, (int, float)) else 0
