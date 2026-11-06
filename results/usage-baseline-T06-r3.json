@@ -1,0 +1,47 @@
+{
+  "estimated_cost_usd": 0.003963744999999999,
+  "cost_status": "estimated",
+  "cost_source": "provider_models_api",
+  "input_tokens": 193269,
+  "output_tokens": 2141,
+  "cache_read_tokens": 184912,
+  "cache_write_tokens": 8337,
+  "reasoning_tokens": 518,
+  "total_tokens": 195410,
+  "api_calls": 9,
+  "model": "anthropic/claude-haiku-5.5",
+  "provider": "openrouter",
+  "session_id": "local-122f8873a6f3c2b3917f874559b1f40620db85de286f3d3924a0a5c79da5201f",
+  "completed": true,
+  "partial": false,
+  "interrupted": false,
+  "turn_exit_reason": "text_response(finish_reason=stop)",
+  "failed": false,
+  "service_tier": null,
+  "auxiliary": {
+    "api_calls": 1,
+    "input_tokens": 592,
+    "output_tokens": 23,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": 0,
+    "estimated_cost_usd": 7.07e-05,
+    "total_tokens": 615,
+    "by_task": {
+      "title_generation": {
+        "api_calls": 1,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "estimated_cost_usd": 7.07e-05,
+        "input_tokens": 592,
+        "output_tokens": 23,
+        "reasoning_tokens": 0
+      }
+    }
+  },
+  "total_including_auxiliary": {
+    "estimated_cost_usd": 0.004034444999999999,
+    "total_tokens": 196025,
+    "api_calls": 10
+  }
+}

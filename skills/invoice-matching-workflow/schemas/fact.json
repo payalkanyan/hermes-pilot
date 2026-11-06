@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "required": ["invoice_id", "supplier", "number", "date", "po_id", "inv_lines", "tax", "total", "po_found", "po_lines", "delivered"],
+  "additionalProperties": false,
+  "properties": {
+    "invoice_id": {"type": "string"},
+    "supplier": {"type": "string"},
+    "number": {"type": "string"},
+    "date": {"type": "string"},
+    "po_id": {"type": "string"},
+    "inv_lines": {"type": "array", "items": {"type": "object", "required": ["sku", "qty", "unit_price"],
+      "properties": {"sku": {"type": "string"}, "qty": {"type": "number"}, "unit_price": {"type": "number"}}}},
+    "tax": {"type": "number"},
+    "total": {"type": "number"},
+    "po_found": {"type": "boolean"},
+    "po_lines": {"type": "array", "items": {"type": "object", "required": ["sku", "qty", "unit_price"],
+      "properties": {"sku": {"type": "string"}, "qty": {"type": "number"}, "unit_price": {"type": "number"}}}},
+    "delivered": {"type": "array", "description": "one entry per receipt line, copied as returned", "items": {"type": "object", "required": ["sku", "qty"],
+      "properties": {"sku": {"type": "string"}, "qty": {"type": "number"}}}}
+  }
+}

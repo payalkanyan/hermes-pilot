@@ -1,0 +1,25 @@
+# secrets: never commit these
+.env
+.env.*
+*.key
+*.pem
+secrets*
+
+# Python environment and caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# runtime files the fake system rewrites on every run
+state/
+
+# local backups and scratch files
+data/tasks_full.jsonl
+*.bak
+*.bak-*
+*.tmp
+*.swp
+.DS_Store
+.idea/
+.vscode/

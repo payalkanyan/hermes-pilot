@@ -1,0 +1,40 @@
+task  pass  pass^3
+T01   3/3   yes
+T02   3/3   yes
+T03   2/3   no
+T04   3/3   yes
+T05   3/3   yes
+T06   3/3   yes
+T07   3/3   yes
+T08   3/3   yes
+T09   0/3   no
+T10   0/3   no
+
+scored runs 30 of 30 (provider-failed runs are excluded, not counted as wrong)
+task success      23/30
+outcome correct   23/30   (the fake accounting system ended in the right state)
+report correct    23/30   (the final JSON answer is valid and right)
+hallucination     0/329 fields
+step adherence    0.79
+median seconds    22.7
+model used        openrouter / anthropic/claude-haiku-5.5
+reported spend this session: $0.10 (0.00 can also mean the model reports no price)
+usage mean api_calls                                     8.167
+usage mean auxiliary.api_calls                           1
+usage mean auxiliary.cache_read_tokens                   0
+usage mean auxiliary.cache_write_tokens                  0
+usage mean auxiliary.estimated_cost_usd                  7.113e-05
+usage mean auxiliary.input_tokens                        592
+usage mean auxiliary.output_tokens                       23.87
+usage mean auxiliary.reasoning_tokens                    0
+usage mean auxiliary.total_tokens                        615.9
+usage mean cache_read_tokens                             1.719e+05
+usage mean cache_write_tokens                            1.128e+04
+usage mean estimated_cost_usd                            0.004577
+usage mean input_tokens                                  1.832e+05
+usage mean output_tokens                                 2892
+usage mean reasoning_tokens                              665.2
+usage mean total_including_auxiliary.api_calls           9.167
+usage mean total_including_auxiliary.estimated_cost_usd  0.004648
+usage mean total_including_auxiliary.total_tokens        1.867e+05
+usage mean total_tokens                                  1.861e+05
