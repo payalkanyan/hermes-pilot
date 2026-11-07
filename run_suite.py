@@ -5,6 +5,7 @@ AGENT_CMD is a shell command. {prompt} is replaced by the quoted prompt and {usa
 its stdout is taken as the agent's final answer, and if it writes JSON to {usage} that is saved with the run."""
 import argparse, json, os, shlex, statistics, subprocess, time, pathlib
 import world_api as W
+import helper_usage
 from grade import grade, load_calls
 ROOT = pathlib.Path(__file__).parent
 
@@ -29,6 +30,20 @@ def real_agent(task, condition, run):
     if usage.exists():
         try: u = json.loads(usage.read_text())
         except Exception: u = None
+    helpers = None
+    if condition == "workflow" and isinstance(u, dict) and u.get("session_id"):
+        d = ROOT / "results" / "sessions"
+        d.mkdir(exist_ok=True)
+        try:
+            subprocess.run(["hermes", "sessions", "export", "--format", "md", "--redact", "--session-id", u["session_id"][:24], str(d) + "/"],
+                           capture_output=True, text=True, timeout=120)
+            files = sorted(d.glob(u["session_id"][:24] + "*.md"))
+            if files:
+                helpers = helper_usage.parse_md(files[-1])
+        except Exception:
+            helpers = None
+    if isinstance(u, dict):
+        u["helpers"] = helpers
     return out.stdout, u
 
 ap = argparse.ArgumentParser()
@@ -72,6 +87,8 @@ for t in tasks:
         open(res_path, "a").write(json.dumps(g) + "\n")
         c = ((usage or {}).get("total_including_auxiliary") or {}).get("estimated_cost_usd")
         spent += c if isinstance(c, (int, float)) else 0
+        hc = (((usage or {}).get("helpers") or {}).get("totals") or {}).get("cost_usd")
+        spent += hc if isinstance(hc, (int, float)) else 0   # helper agents' cost counts toward the limit too
         if a.max_cost is not None and spent >= a.max_cost and not stopped:
             stopped = f"Stopped: reported spend ${spent:.2f} reached --max-cost {a.max_cost}. Continue with --resume."
         if g["infra_failed"] and "429" in str((usage or {}).get("failure", "")):
@@ -82,7 +99,7 @@ def flat(d, pre=""):
     out = {}
     for k, v in (d or {}).items():
         if isinstance(v, dict):
-            if k != "by_task": out.update(flat(v, f"{pre}{k}."))
+            if k not in ("by_task", "helpers"): out.update(flat(v, f"{pre}{k}."))
         elif isinstance(v, (int, float)) and not isinstance(v, bool):
             out[f"{pre}{k}"] = v
     return out
@@ -96,6 +113,8 @@ n = len(rows); ft = sum(x["fields_total"] for x in rows)
 print(f"\nscored runs {len(rows)} of {len(allrows)} (provider-failed runs are excluded, not counted as wrong)")
 print(f"task success      {sum(x['success'] for x in rows)}/{n}")
 print(f"outcome correct   {sum(x['outcome_correct'] for x in rows)}/{n}   (the fake accounting system ended in the right state)")
+print(f"semantic correct  {sum(x.get('semantic_correct', x['success']) for x in rows)}/{n}   (right invoices, right reasons by code, right drafts; ignores extra words in the reason text)")
+print(f"reason text slips {sum(x.get('reason_format_slips', 0) for x in rows)} exception(s) had the right reason code plus extra words")
 print(f"report correct    {sum(x['report_correct'] for x in rows)}/{n}   (the final JSON answer is valid and right)")
 print(f"hallucination     {sum(x['fields_ungrounded'] for x in rows)}/{ft} fields")
 print(f"step adherence    {statistics.mean([x['adherence'] for x in rows] or [0]):.2f}")
@@ -103,6 +122,15 @@ print(f"median seconds    {statistics.median([x['seconds'] for x in rows] or [0]
 seen = sorted({f"{x['usage'].get('provider')} / {x['usage'].get('model')}" for x in allrows if isinstance(x.get("usage"), dict)})
 if seen:
     print("model used        " + "; ".join(seen) + ("   <-- MORE THAN ONE MODEL, do not compare these runs" if len(seen) > 1 else ""))
+hl = [x["usage"]["helpers"] for x in rows if isinstance(x.get("usage"), dict) and isinstance(x["usage"].get("helpers"), dict)]
+if hl:
+    pc = [((x["usage"].get("total_including_auxiliary") or {}).get("estimated_cost_usd") or 0) for x in rows if isinstance(x.get("usage"), dict) and isinstance(x["usage"].get("helpers"), dict)]
+    pa = [((x["usage"].get("total_including_auxiliary") or {}).get("api_calls") or 0) for x in rows if isinstance(x.get("usage"), dict) and isinstance(x["usage"].get("helpers"), dict)]
+    hc = [h["totals"].get("cost_usd", 0) for h in hl]; ha = [h["totals"].get("api_calls", 0) for h in hl]
+    print(f"ALL-IN (parent + helpers) mean cost per task  ${statistics.mean(p + c for p, c in zip(pc, hc)):.4f}   (parent ${statistics.mean(pc):.4f} + helpers ${statistics.mean(hc):.4f})")
+    print(f"ALL-IN (parent + helpers) mean API calls      {statistics.mean(p + c for p, c in zip(pa, ha)):.1f}   (parent {statistics.mean(pa):.1f} + helpers {statistics.mean(ha):.1f}); mean helpers per task {statistics.mean(h['n_helpers'] for h in hl):.1f}")
+    for k in sorted({k for h in hl for k in h["totals"] if "token" in k}):
+        print(f"helpers mean {k:30} {statistics.mean(h['totals'].get(k, 0) for h in hl):.4g}")
 us = [flat(x["usage"]) for x in rows if isinstance(x.get("usage"), dict)]
 if len(allrows) > len(rows):
     print(f"WARNING: {len(allrows) - len(rows)} run(s) failed at the provider and were excluded. Use --resume to redo them.")

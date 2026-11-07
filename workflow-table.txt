@@ -1,0 +1,47 @@
+nohup: ignoring input
+task  pass  pass^1
+T01   1/1   yes
+T02   1/1   yes
+T03   1/1   yes
+T04   1/1   yes
+T05   1/1   yes
+T06   1/1   yes
+T07   1/1   yes
+T08   1/1   yes
+T09   1/1   yes
+T10   0/1   no
+
+scored runs 10 of 10 (provider-failed runs are excluded, not counted as wrong)
+task success      9/10
+outcome correct   9/10   (the fake accounting system ended in the right state)
+semantic correct  9/10   (right invoices, right reasons by code, right drafts; ignores extra words in the reason text)
+reason text slips 0 exception(s) had the right reason code plus extra words
+report correct    9/10   (the final JSON answer is valid and right)
+hallucination     0/187 fields
+step adherence    0.90
+median seconds    42.05
+model used        openrouter / anthropic/claude-haiku-5.5
+ALL-IN (parent + helpers) mean cost per task  $0.0482   (parent $0.0310 + helpers $0.0172)
+ALL-IN (parent + helpers) mean API calls      52.9   (parent 10.0 + helpers 42.9); mean helpers per task 11.3
+helpers mean tokens.input                   6.358e+05
+helpers mean tokens.output                  7545
+reported spend this session: $0.48 (0.00 can also mean the model reports no price)
+usage mean api_calls                                     9
+usage mean auxiliary.api_calls                           1
+usage mean auxiliary.cache_read_tokens                   0
+usage mean auxiliary.cache_write_tokens                  0
+usage mean auxiliary.estimated_cost_usd                  7.15e-05
+usage mean auxiliary.input_tokens                        592
+usage mean auxiliary.output_tokens                       24.6
+usage mean auxiliary.reasoning_tokens                    0
+usage mean auxiliary.total_tokens                        616.6
+usage mean cache_read_tokens                             2.679e+05
+usage mean cache_write_tokens                            3.333e+04
+usage mean estimated_cost_usd                            0.03089
+usage mean input_tokens                                  3.013e+05
+usage mean output_tokens                                 1.362e+04
+usage mean reasoning_tokens                              1077
+usage mean total_including_auxiliary.api_calls           10
+usage mean total_including_auxiliary.estimated_cost_usd  0.03096
+usage mean total_including_auxiliary.total_tokens        3.155e+05
+usage mean total_tokens                                  3.149e+05
