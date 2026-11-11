@@ -1,0 +1,93 @@
+# Invoice matching as a graph of nodes. Each node declares exactly what it receives.
+# A runner must pass a node ONLY its declared inputs (no history, no other nodes' output).
+name: invoice-matching
+version: 0.1
+goal: Match one folder of supplier invoices to purchase orders and deliveries, create draft bills for the ones that pass, and report the rest.
+context_policy: fresh context per node; only the declared inputs are passed
+inputs:
+  folder: {type: string, from: user, description: mailbox folder id in the invoice tools}
+  month:  {type: string, from: user, description: "period like 2026-10"}
+nodes:
+  - id: list_invoices
+    type: tool
+    goal: List the invoices in the folder, in arrival order.
+    tool: list_invoices
+    inputs: [folder]
+    outputs: [invoice_ids]
+    checks: [schema, non_empty]
+    on_fail: {retry: 1, then: stop}
+    next: [{to: collect_facts}]
+
+  - id: collect_facts
+    type: agent
+    for_each: invoice_ids
+    parallel: 10
+    goal: Collect the raw facts for this one invoice. Copy values exactly as the tools return them. Never guess.
+    instructions: >-
+      Call get_invoice with the invoice id. Then call get_purchase_order and get_deliveries with the po_ref from the invoice.
+      If a tool says not found, set po_found to false and leave po_lines empty, or leave delivered empty. delivered has one entry per receipt line, copied exactly.
+    inputs: [item]
+    tools: [get_invoice, get_purchase_order, get_deliveries]
+    output_schema: schemas/fact.json
+    outputs: [facts]
+    checks: [schema, grounded_in_tool_results]
+    on_fail: {retry: 1, then: stop}
+    next: [{to: decide}]
+
+  - id: decide
+    type: code
+    goal: Apply the six matching rules in code and give each invoice a verdict.
+    script: checks/decide.py
+    inputs: [facts, month]
+    outputs: [verdicts]
+    checks: [schema, one_verdict_per_invoice]
+    next: [{to: route}]
+
+  - id: route
+    type: branch
+    goal: Split invoices by verdict.
+    on: verdicts
+    inputs: [verdicts, facts]
+    outputs: [ok_items, exception_items]
+    next:
+      - {to: create_draft, label: verdict is ok}
+      - {to: record_exceptions, label: any other verdict}
+
+  - id: create_draft
+    type: tool
+    for_each: ok_items
+    goal: Create the draft bill for one matched invoice.
+    tool: create_draft_bill
+    inputs: [item]
+    outputs: [drafts]
+    checks: [schema]
+    on_fail: {retry: 0, then: record_error}
+    next: [{to: read_back}]
+
+  - id: read_back
+    type: tool
+    for_each: drafts
+    goal: Read the draft back from the accounting system and confirm it exists with the right total.
+    tool: get_draft_bill
+    inputs: [item]
+    outputs: [confirmed_drafts]
+    checks: [readback_matches_total]
+    on_fail: {retry: 1, then: record_error}
+    next: [{to: report}]
+
+  - id: record_exceptions
+    type: code
+    goal: Record each rejected invoice with its single reason code.
+    script: checks/record_exceptions.py
+    inputs: [exception_items]
+    outputs: [exceptions]
+    checks: [schema]
+    next: [{to: report}]
+
+  - id: report
+    type: code
+    goal: Assemble the final JSON answer.
+    script: checks/report.py
+    inputs: [confirmed_drafts, exceptions]
+    outputs: [final_answer]
+    checks: [schema, reasons_are_bare_codes]
