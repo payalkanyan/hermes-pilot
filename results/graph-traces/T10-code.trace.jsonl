@@ -1,0 +1,8 @@
+{"node": "list_invoices", "type": "tool", "status": "ok", "input_keys": ["folder"], "n_items": null, "input_chars": 17, "output_chars": 857, "seconds": 0.0, "model_calls": 0}
+{"node": "collect_facts", "type": "agent", "status": "ok", "input_keys": ["item"], "n_items": 60, "input_chars": 842, "output_chars": 27608, "seconds": 0.01, "model_calls": 0}
+{"node": "decide", "type": "code", "status": "ok", "input_keys": ["facts", "month"], "n_items": null, "input_chars": 27628, "output_chars": 3155, "seconds": 0.02, "model_calls": 0}
+{"node": "route", "type": "branch", "status": "ok", "input_keys": ["facts", "verdicts"], "n_items": null, "input_chars": 30763, "output_chars": 3846, "seconds": 0.0, "model_calls": 0}
+{"node": "create_draft", "type": "tool", "status": "ok", "input_keys": ["item"], "n_items": 30, "input_chars": 2082, "output_chars": 2782, "seconds": 0.0, "model_calls": 0}
+{"node": "read_back", "type": "tool", "status": "ok", "input_keys": ["item"], "n_items": 30, "input_chars": 2772, "output_chars": 2272, "seconds": 0.0, "model_calls": 0}
+{"node": "record_exceptions", "type": "code", "status": "ok", "input_keys": ["exception_items"], "n_items": null, "input_chars": 1752, "output_chars": 1717, "seconds": 0.01, "model_calls": 0}
+{"node": "report", "type": "code", "status": "ok", "input_keys": ["confirmed_drafts", "exceptions"], "n_items": null, "input_chars": 3989, "output_chars": 3998, "seconds": 0.01, "model_calls": 0}

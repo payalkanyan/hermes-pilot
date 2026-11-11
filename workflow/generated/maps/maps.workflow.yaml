@@ -1,0 +1,208 @@
+name: maps
+version: 0.1
+goal: Answer one location question (geocode, reverse geocode, nearby places, distance,
+  directions, timezone, area or bounding-box search) with scripts/maps_client.py using
+  free OpenStreetMap data.
+context_policy: fresh context per node; only the declared inputs are passed
+inputs:
+  request:
+    type: string
+    from: user
+    description: location question in plain words, or a Telegram pin with latitude
+      and longitude
+nodes:
+- id: parse_request
+  type: agent
+  goal: Turn the user's request into exactly one maps operation and its arguments.
+  instructions: 'Choose one operation: search (place name to coordinates), reverse
+    (coordinates to address), nearby (places by category around a point or address),
+    distance (travel distance and time), directions (turn-by-turn), timezone (for
+    coordinates), area (bounding box for a named place), bbox (places inside a box).
+    Copy place names, coordinates, categories and modes exactly as the user wrote
+    them. Default mode is driving. Never guess coordinates. If a required value is
+    missing, set operation to needs_clarification and state what is missing in question.'
+  inputs:
+  - request
+  tools: []
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - operation
+    - args
+    properties:
+      operation:
+        type: string
+        enum:
+        - search
+        - reverse
+        - nearby
+        - distance
+        - directions
+        - timezone
+        - area
+        - bbox
+        - needs_clarification
+      question:
+        type: string
+      args:
+        type: object
+        additionalProperties: false
+        properties:
+          query:
+            type: string
+          lat:
+            type: number
+          lon:
+            type: number
+          to:
+            type: string
+          category:
+            type: array
+            items:
+              type: string
+          mode:
+            type: string
+            enum:
+            - driving
+            - walking
+            - cycling
+          radius:
+            type: integer
+          limit:
+            type: integer
+          bbox:
+            type: array
+            items:
+              type: number
+            minItems: 4
+            maxItems: 4
+  outputs:
+  - parsed
+  checks:
+  - schema
+  - required_args_present
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: route_operation
+- id: route_operation
+  type: branch
+  goal: Send the parsed request to the command group that handles its operation.
+  true: parsed
+  inputs:
+  - parsed
+  outputs:
+  - parsed
+  checks:
+  - schema
+  next:
+  - to: run_place_lookup
+    label: operation is search
+    reverse: null
+    timezone or area: null
+  - to: run_nearby
+    label: operation is nearby or bbox
+  - to: run_route
+    label: operation is distance or directions
+  - to: report_missing
+    label: operation is needs_clarification
+- id: run_place_lookup
+  type: code
+  goal: Run the search, reverse, timezone or area command and capture its output.
+  script: scripts/run_lookup.py
+  inputs:
+  - parsed
+  outputs:
+  - command_result
+  checks:
+  - schema
+  - exit_code_zero
+  - output_not_empty
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: format_answer
+- id: run_nearby
+  type: code
+  goal: Run the nearby or bbox command and capture its output.
+  script: scripts/run_nearby.py
+  inputs:
+  - parsed
+  outputs:
+  - command_result
+  checks:
+  - schema
+  - exit_code_zero
+  - output_not_empty
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: format_answer
+- id: run_route
+  type: code
+  goal: Run the distance or directions command and capture its output.
+  script: scripts/run_route.py
+  inputs:
+  - parsed
+  outputs:
+  - command_result
+  checks:
+  - schema
+  - exit_code_zero
+  - output_not_empty
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: format_answer
+- id: report_missing
+  type: code
+  goal: Pass the clarification question through as the command result, without running
+    any maps command.
+  script: scripts/report_missing.py
+  inputs:
+  - parsed
+  outputs:
+  - command_result
+  checks:
+  - schema
+  next:
+  - to: format_answer
+- id: format_answer
+  type: agent
+  goal: Write the final answer for the user from the command output only.
+  instructions: Use only the values in command_result. For place lists, give a numbered
+    list with name, address, distance, and the maps_url as a plain link. For routes,
+    give the distance, duration and numbered steps. For timezones, give the name,
+    UTC offset and local time. If command_result is a clarification question, ask
+    it. Never add places, addresses or coordinates that are not in command_result.
+    If the user asks whether a place is open now, report the hours field and say it
+    is community-maintained and may be out of date.
+  inputs:
+  - command_result
+  tools: []
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - answer
+    - links
+    properties:
+      answer:
+        type: string
+      links:
+        type: array
+        items:
+          type: string
+  outputs:
+  - final_answer
+  checks:
+  - schema
+  - grounded_in_command_output
+  on_fail:
+    retry: 1
+    then: stop

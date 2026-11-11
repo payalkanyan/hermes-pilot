@@ -1,0 +1,318 @@
+name: architecture-diagram
+version: 0.1
+goal: Turn a user's description of a software or cloud architecture into one self-contained
+  dark-themed HTML file with inline SVG, saved to a user-chosen path after the user
+  confirms the layout.
+context_policy: fresh context per node; only the declared inputs are passed
+inputs:
+  system_description:
+    type: string
+    from: user
+    description: components, connections, technologies, and any boundaries (VPC, region,
+      security group) of the system to diagram
+  output_path:
+    type: string
+    from: user
+    description: absolute path for the .html file; defaults to ./[project-name]-architecture.html
+      if the user gives none
+nodes:
+- id: extract_model
+  type: agent
+  goal: Turn the system description into a structured list of components, connections
+    and boundaries.
+  instructions: Read system_description. List each component with a name, a type (frontend,
+    backend, database, cloud, security, message_bus, external), and a short sublabel.
+    List each connection as from, to, label, and whether it is a security flow. List
+    each boundary (security group or region) with the components it contains. Do not
+    invent components that the description does not mention. If a type is unclear,
+    use external and say so in notes.
+  tools: []
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - components
+    - connections
+    - boundaries
+    - notes
+    properties:
+      components:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required:
+          - id
+          - name
+          - type
+          - sublabel
+          properties:
+            id:
+              type: string
+            name:
+              type: string
+            type:
+              type: string
+              enum:
+              - frontend
+              - backend
+              - database
+              - cloud
+              - security
+              - message_bus
+              - external
+            sublabel:
+              type: string
+      connections:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required:
+          - from
+          - to
+          - label
+          - security
+          properties:
+            from:
+              type: string
+            to:
+              type: string
+            label:
+              type: string
+            security:
+              type: boolean
+      boundaries:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required:
+          - kind
+          - label
+          - contains
+          properties:
+            kind:
+              type: string
+              enum:
+              - security_group
+              - region
+            label:
+              type: string
+            contains:
+              type: array
+              items:
+                type: string
+      notes:
+        type: array
+        items:
+          type: string
+  inputs:
+  - system_description
+  outputs:
+  - model
+  checks:
+  - schema
+  - ids_referenced_exist
+  - no_unmentioned_components
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: layout
+- id: layout
+  type: agent
+  goal: Assign x and y coordinates so that boundaries sit around their components,
+    message buses sit in the gaps between services, and no boxes overlap.
+  instructions: Use 60px height for services and 80 to 120px for large components.
+    Keep at least 40px vertical gap between components. Place message buses in the
+    gaps, not on top of services. Give every component an x, y, width and height.
+    Give every boundary an x, y, width and height that fully contains its components
+    with padding. Compute the lowest y of all boundaries and record it as max_boundary_bottom.
+  tools: []
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - positions
+    - boundary_boxes
+    - max_boundary_bottom
+    properties:
+      positions:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required:
+          - id
+          - x
+          - y
+          - width
+          - height
+          properties:
+            id:
+              type: string
+            x:
+              type: number
+            y:
+              type: number
+            width:
+              type: number
+            height:
+              type: number
+      boundary_boxes:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required:
+          - label
+          - x
+          - y
+          - width
+          - height
+          properties:
+            label:
+              type: string
+            x:
+              type: number
+            y:
+              type: number
+            width:
+              type: number
+            height:
+              type: number
+      max_boundary_bottom:
+        type: number
+  inputs:
+  - model
+  outputs:
+  - layout
+  checks:
+  - schema
+  - no_overlapping_boxes
+  - boundaries_contain_components
+  - min_gap_40px
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: render_html
+- id: render_html
+  type: agent
+  goal: Write one self-contained HTML file with the dark grid background, the SVG
+    diagram, summary cards, and a footer.
+  instructions: 'Use the template structure from skill architecture-diagram templates/template.html
+    (load it with skill_view). Use the semantic colour table: frontend cyan, backend
+    emerald, database violet, cloud amber, security rose, message bus orange, external
+    slate. Draw arrows before component boxes. Use the double-rect technique for semi-transparent
+    fills. Security flows are dashed rose lines. Security groups are dashed (4,4)
+    rose; regions are dashed (8,4) amber with rx 12. Place the legend at least 20px
+    below max_boundary_bottom and outside all boundaries. Use JetBrains Mono from
+    Google Fonts, no JavaScript, no other external resources.'
+  tools:
+  - skill_view
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - html
+    properties:
+      html:
+        type: string
+  inputs:
+  - model
+  - layout
+  outputs:
+  - html_text
+  checks:
+  - schema
+  - valid_html_document
+  - no_script_tag
+  - legend_below_boundaries
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: confirm_write
+- id: confirm_write
+  type: agent
+  goal: Show the user the planned output path and the component count, and get explicit
+    approval before writing the file.
+  instructions: Present output_path and the number of components and connections.
+    Ask the user to approve writing the file. Do not write anything in this step.
+    Return approved true only if the user explicitly says yes.
+  tools: []
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - approved
+    properties:
+      approved:
+        type: boolean
+  inputs:
+  - output_path
+  - model
+  outputs:
+  - approval
+  checks:
+  - schema
+  - explicit_user_approval
+  next:
+  - to: route_approval
+- id: route_approval
+  type: branch
+  goal: Continue to the write step only if the user approved.
+  true: approval
+  inputs:
+  - approval
+  outputs:
+  - approved_flag
+  next:
+  - to: write_file
+    label: user approved
+  - to: stop_no_write
+    label: user did not approve
+- id: write_file
+  type: tool
+  goal: Save the approved HTML to the output path.
+  tool: write_file
+  inputs:
+  - output_path
+  - html_text
+  outputs:
+  - written_path
+  checks:
+  - schema
+  - file_exists_at_path
+  on_fail:
+    retry: 0
+    then: stop
+  next:
+  - to: verify_file
+- id: verify_file
+  type: code
+  goal: Confirm the written file exists, is non-empty, and contains an SVG element.
+  script: checks/verify_file.py
+  inputs:
+  - written_path
+  outputs:
+  - final_report
+  checks:
+  - schema
+  - svg_present
+  next:
+  - to: stop_no_write
+- id: stop_no_write
+  type: code
+  goal: Report the final state (written path and verification, or that nothing was
+    written).
+  script: checks/report_state.py
+  inputs:
+  - approval
+  - final_report
+  outputs:
+  - summary
+  checks:
+  - schema

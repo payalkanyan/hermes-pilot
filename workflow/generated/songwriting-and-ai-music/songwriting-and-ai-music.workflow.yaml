@@ -1,0 +1,240 @@
+name: songwriting-and-ai-music
+version: 0.1
+goal: Turn a concept (original song or parody of a supplied song) into lyrics with
+  structure tags and a Suno style prompt, get human approval, then save the package.
+context_policy: fresh context per node; only the declared inputs are passed
+inputs:
+  concept:
+    type: string
+    from: user
+    description: Emotional core, theme, or hook idea for the song
+  mode:
+    type: string
+    from: user
+    description: Either 'original' or 'parody'
+  mood:
+    type: string
+    from: user
+    description: Mood or emotional arc, e.g. whisper to roar to whisper
+  genre:
+    type: string
+    from: user
+    description: Genre and era, described by sound, never by artist name
+  source_lyrics:
+    type: string
+    from: user
+    description: Lyrics of the song to parody or adapt. Required when mode is 'parody',
+      empty otherwise
+nodes:
+- id: check_mode
+  type: branch
+  goal: Route the run to skeleton mapping for parody or straight to drafting for an
+    original song.
+  true: mode
+  inputs:
+  - mode
+  - source_lyrics
+  outputs:
+  - route_taken
+  checks:
+  - schema
+  - parody_has_source_lyrics
+  next:
+  - to: map_skeleton
+    label: mode is parody
+  - to: draft_lyrics
+    label: mode is original
+- id: map_skeleton
+  type: agent
+  goal: Map the source song's structure line by line (syllables, rhyme scheme, stressed
+    syllables, held notes).
+  instructions: Read only the source lyrics. For each line, count syllables, label
+    the rhyme scheme letter (A, B, C...), and mark stressed syllables in capitals.
+    Note sections and where long held notes fall. Do not invent lines. Do not add
+    commentary.
+  inputs:
+  - source_lyrics
+  tools: []
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - skeleton
+    properties:
+      skeleton:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required:
+          - section
+          - line
+          - syllables
+          - rhyme_letter
+          - stressed
+          properties:
+            section:
+              type: string
+            line:
+              type: string
+            syllables:
+              type: integer
+            rhyme_letter:
+              type: string
+            stressed:
+              type: string
+  outputs:
+  - skeleton
+  checks:
+  - schema
+  - line_count_matches_source
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: draft_lyrics
+- id: draft_lyrics
+  type: agent
+  goal: Draft the full lyrics with bracketed structure and performance metatags, following
+    the skeleton when one is given.
+  instructions: Build the song from the concept, mood, and genre. If a skeleton is
+    given, match each section's syllable count within 1-2 unstressed syllables and
+    keep the rhyme scheme. Keep some original lines intact when parodying. Use 5-8
+    metatags per section at most, no contradictory tags in one section. Spell out
+    numbers and space out acronyms. If review_notes is not empty, apply those notes.
+  inputs:
+  - concept
+  - mood
+  - genre
+  - skeleton
+  - review_notes
+  tools: []
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - title
+    - lyrics
+    properties:
+      title:
+        type: string
+      lyrics:
+        type: string
+  outputs:
+  - title
+  - lyrics
+  checks:
+  - schema
+  - lyrics_under_3000_chars
+  - metatags_in_allowed_list
+  - no_artist_names
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: build_suno_prompt
+- id: build_suno_prompt
+  type: agent
+  goal: Build the Suno Style field and Exclude Styles field that describe the dynamic
+    journey, and place matching tags in the lyrics.
+  instructions: 'Style field formula: genre, mood, era, instruments, vocal persona,
+    production, dynamics, with the journey described in order. Use BPM and key if
+    the mood calls for it. Do not use artist names or trademarks. Exclude field lists
+    what the song must not sound like. Add the same structure tags to the lyrics where
+    they are missing.'
+  inputs:
+  - title
+  - lyrics
+  - mood
+  - genre
+  tools: []
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - style_field
+    - exclude_field
+    - lyrics_with_tags
+    properties:
+      style_field:
+        type: string
+      exclude_field:
+        type: string
+      lyrics_with_tags:
+        type: string
+  outputs:
+  - style_field
+  - exclude_field
+  - lyrics_with_tags
+  checks:
+  - schema
+  - style_under_1000_chars
+  - lyrics_under_3000_chars
+  - no_artist_names
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: package_prompt
+- id: package_prompt
+  type: code
+  goal: Assemble the title, lyrics, style, and exclude fields into one review package
+    as plain text. Writes nothing.
+  script: checks/package_prompt.py
+  inputs:
+  - title
+  - lyrics_with_tags
+  - style_field
+  - exclude_field
+  outputs:
+  - review_package
+  checks:
+  - schema
+  - all_fields_present
+  next:
+  - to: request_approval
+- id: request_approval
+  type: tool
+  goal: Show the review package to the user and ask whether to save it, redraft it,
+    or drop it.
+  tool: ask_user
+  inputs:
+  - review_package
+  outputs:
+  - review_decision
+  - review_notes
+  checks:
+  - schema
+  - decision_is_approve_or_redraft_or_drop
+  on_fail:
+    retry: 0
+    then: stop
+  next:
+  - to: route_approval
+- id: route_approval
+  type: branch
+  goal: Send approved packages to save, redraft rejected ones, and stop on drop.
+  true: review_decision
+  inputs:
+  - review_decision
+  outputs:
+  - approval_route
+  checks:
+  - schema
+  next:
+  - to: save_package
+    label: decision is approve
+  - to: draft_lyrics
+    label: decision is redraft
+- id: save_package
+  type: code
+  goal: Write the approved review package to the workspace as a text file. Runs only
+    after approval.
+  script: checks/save_package.py
+  inputs:
+  - review_package
+  outputs:
+  - saved_path
+  checks:
+  - schema
+  - file_exists_after_write

@@ -1,0 +1,225 @@
+name: humanizer
+version: 0.1
+goal: Rewrite a piece of text to remove AI writing patterns and add a natural voice,
+  then return it inline or write it back to its file after approval.
+context_policy: fresh context per node; only the declared inputs are passed
+inputs:
+  source:
+    type: string
+    from: user
+    description: Text to humanize, given inline, or a file path to read
+  voice_sample:
+    type: string
+    from: user
+    description: Optional sample of the user's own writing, inline or as a file path.
+      Leave empty for the default voice.
+nodes:
+- id: resolve_source
+  type: code
+  goal: Decide whether the source is a file path or inline text, and load the draft
+    text.
+  script: checks/resolve_source.py
+  inputs:
+  - source
+  outputs:
+  - draft_text
+  - source_kind
+  - source_path
+  checks:
+  - schema
+  - non_empty
+  next:
+  - to: calibrate_voice
+- id: calibrate_voice
+  type: agent
+  goal: Summarise the voice of the writing sample as a short style profile, or return
+    the default profile if no sample was given.
+  instructions: If voice_sample is empty, return the default profile with every field
+    set to the default value. If voice_sample is a file path, call read_file on it
+    first. Otherwise treat voice_sample as inline text. Describe sentence length,
+    word choice level, paragraph openings, punctuation habits, recurring phrases,
+    and transitions. Do not quote more than one short phrase from the sample.
+  inputs:
+  - voice_sample
+  tools:
+  - read_file
+  output_schema:
+    type: object
+    properties:
+      voice_profile:
+        type: object
+        properties:
+          sentence_length:
+            type: string
+          word_choice:
+            type: string
+          paragraph_openings:
+            type: string
+          punctuation:
+            type: string
+          transitions:
+            type: string
+        required:
+        - sentence_length
+        - word_choice
+        - paragraph_openings
+        - punctuation
+        - transitions
+        additionalProperties: false
+    required:
+    - voice_profile
+    additionalProperties: false
+  outputs:
+  - voice_profile
+  checks:
+  - schema
+  - grounded_in_tool_results
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: rewrite_draft
+- id: rewrite_draft
+  type: agent
+  goal: Rewrite the draft to remove the listed AI patterns, keep the meaning, and
+    match the voice profile.
+  instructions: Scan the draft for AI patterns such as inflated significance, promotional
+    wording, vague attributions, rule-of-three lists, em dash overuse, boldface and
+    inline-header lists, title case headings, emojis, chatbot phrases, filler, excess
+    hedging, and generic upbeat endings. Replace them with plain, specific wording.
+    Keep every fact and claim. Do not add new facts, names, numbers, or sources. Vary
+    sentence rhythm and allow a clear opinion or first-person phrasing where it fits
+    the voice profile. Return the rewrite and a list of the changes you made.
+  inputs:
+  - draft_text
+  - voice_profile
+  tools: []
+  output_schema:
+    type: object
+    properties:
+      rewrite:
+        type: string
+      changes:
+        type: array
+        items:
+          type: object
+          properties:
+            pattern:
+              type: string
+            before:
+              type: string
+            after:
+              type: string
+          required:
+          - pattern
+          - before
+          - after
+          additionalProperties: false
+    required:
+    - rewrite
+    - changes
+    additionalProperties: false
+  outputs:
+  - rewrite
+  - changes
+  checks:
+  - schema
+  - meaning_preserved
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: anti_ai_pass
+- id: anti_ai_pass
+  type: agent
+  goal: Name any remaining AI tells in the rewrite, then revise once more to remove
+    them.
+  instructions: Ask what still makes the text read as AI generated. List each remaining
+    tell briefly. Revise the text once to fix those tells. Do not add new facts. Return
+    the final text and the tells you found.
+  inputs:
+  - rewrite
+  tools: []
+  output_schema:
+    type: object
+    properties:
+      final_text:
+        type: string
+      remaining_tells:
+        type: array
+        items:
+          type: string
+    required:
+    - final_text
+    - remaining_tells
+    additionalProperties: false
+  outputs:
+  - final_text
+  - remaining_tells
+  checks:
+  - schema
+  - no_new_facts
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: route_output
+- id: route_output
+  type: branch
+  goal: Send file sources to the approval step and inline text straight to the final
+    report.
+  true: source_kind
+  inputs:
+  - source_kind
+  outputs:
+  - route
+  next:
+  - to: approve_write
+    label: source_kind is file
+  - to: final_report
+    label: source_kind is inline
+- id: approve_write
+  type: branch
+  goal: Ask the user to approve writing the rewrite back over the source file, and
+    route on the answer.
+  true: human_decision
+  inputs:
+  - final_text
+  - source_path
+  outputs:
+  - human_decision
+  checks:
+  - human_approved_before_write
+  next:
+  - to: write_back
+    label: user approves the write
+  - to: final_report
+    label: user declines the write
+- id: write_back
+  type: tool
+  goal: Write the approved rewrite to the source file.
+  tool: write_file
+  inputs:
+  - source_path
+  - final_text
+  outputs:
+  - write_result
+  checks:
+  - schema
+  - readback_matches
+  on_fail:
+    retry: 0
+    then: stop
+  next:
+  - to: final_report
+- id: final_report
+  type: code
+  goal: Assemble the final answer with the rewritten text and the remaining tells.
+  script: checks/final_report.py
+  inputs:
+  - final_text
+  - remaining_tells
+  outputs:
+  - final_answer
+  checks:
+  - schema

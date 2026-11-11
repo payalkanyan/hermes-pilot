@@ -1,0 +1,187 @@
+name: claude-code-delegation
+version: 0.1
+goal: Run one coding task through the Claude Code CLI in print mode inside a git repo,
+  only after explicit approval, then verify the changes and report what happened.
+context_policy: fresh context per node; only the declared inputs are passed
+inputs:
+  repo_path:
+    type: string
+    from: user
+    description: absolute path to the git repository the task applies to
+  task:
+    type: string
+    from: user
+    description: the coding task to hand to Claude Code
+    in plain language: null
+  user_decision:
+    type: string
+    from: user
+    description: yes or no, given in this run after reviewing the run_command shown
+      by the approval gate
+nodes:
+- id: preflight
+  type: code
+  goal: Check that the claude CLI is installed and logged in, and that repo_path is
+    a git repository.
+  script: scripts/claude_preflight.py
+  inputs:
+  - repo_path
+  outputs:
+  - preflight_report
+  checks:
+  - schema
+  - claude_version_present
+  - auth_status_parsed
+  - is_git_repo
+  on_fail:
+    retry: 0
+    then: stop
+  next:
+  - to: check_ready
+- id: check_ready
+  type: branch
+  goal: Continue only if the preflight report says Claude Code is installed, authenticated
+    and the path is a git repo.
+  true: preflight_report
+  inputs:
+  - preflight_report
+  outputs:
+  - preflight_report
+  next:
+  - to: build_command
+    label: preflight passed
+  - to: report
+    label: preflight failed
+- id: build_command
+  type: code
+  goal: Build one print-mode claude command with an explicit tool allowlist and a
+    turn limit. Never use bypass flags.
+  script: scripts/build_claude_command.py
+  inputs:
+  - task
+  - repo_path
+  outputs:
+  - run_command
+  checks:
+  - schema
+  - print_mode_only
+  - no_skip_permissions_flag
+  - has_max_turns
+  next:
+  - to: approval_gate
+- id: approval_gate
+  type: branch
+  goal: Proceed to the write step only if the user explicitly approved the exact run_command.
+  true: user_decision
+  inputs:
+  - run_command
+  - user_decision
+  outputs:
+  - run_decision
+  next:
+  - to: run_claude
+    label: user approved
+  - to: report
+    label: user declined or unclear
+- id: run_claude
+  type: code
+  goal: Execute the approved claude -p command in repo_path with JSON output and return
+    the parsed result.
+  script: scripts/run_claude_print.py
+  inputs:
+  - run_command
+  - repo_path
+  outputs:
+  - claude_result
+  checks:
+  - schema
+  - json_parsed
+  - subtype_reported
+  on_fail:
+    retry: 0
+    then: stop
+  next:
+  - to: verify_result
+- id: verify_result
+  type: code
+  goal: Read git status and diff statistics for repo_path after the run, without changing
+    anything.
+  script: scripts/verify_changes.py
+  inputs:
+  - claude_result
+  - repo_path
+  outputs:
+  - verification
+  checks:
+  - schema
+  - git_read_only
+  next:
+  - to: review_diff
+- id: review_diff
+  type: agent
+  goal: Review the changed files for bugs, security problems and missing tests, quoting
+    only what the tools return.
+  instructions: Use read_file and search_files to inspect the files listed in verification.changed_files
+    inside repo_path. Do not edit anything. Report only issues you can point to in
+    a specific file and line. If a file cannot be read, add that to issues rather
+    than guessing its contents.
+  tools:
+  - read_file
+  - search_files
+  inputs:
+  - task
+  - repo_path
+  - verification
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - verdict
+    - issues
+    properties:
+      verdict:
+        type: string
+        enum:
+        - looks_good
+        - needs_changes
+        - unverified
+      issues:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required:
+          - file
+          - detail
+          properties:
+            file:
+              type: string
+            detail:
+              type: string
+  outputs:
+  - review
+  checks:
+  - schema
+  - grounded_in_tool_results
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: report
+- id: report
+  type: code
+  goal: Assemble the final JSON answer. If an earlier output is absent, the step did
+    not run and must be reported as such.
+  script: scripts/report.py
+  inputs:
+  - preflight_report
+  - run_decision
+  - claude_result
+  - verification
+  - review
+  outputs:
+  - final_answer
+  checks:
+  - schema
+  - absent_steps_marked_not_run
+  - no_claims_beyond_tool_output

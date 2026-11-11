@@ -1,0 +1,199 @@
+name: apple-notes
+version: 0.1
+goal: Search, create, or export Apple Notes through the memo CLI on macOS, with human
+  approval before any note is written or exported.
+context_policy: fresh context per node; only the declared inputs are passed
+inputs:
+  action:
+    type: string
+    from: user
+    description: 'one of: search, create, export'
+  query:
+    type: string
+    from: user
+    description: search text, used when action is search
+  folder:
+    type: string
+    from: user
+    description: Notes folder name, optional
+  note_text:
+    type: string
+    from: user
+    description: raw content for a new note, used when action is create
+  export_format:
+    type: string
+    from: user
+    description: html or markdown, used when action is export
+nodes:
+- id: preflight
+  type: code
+  goal: Confirm the host is macOS, memo is installed, and Notes automation is available.
+  script: checks/preflight_memo.sh
+  inputs: []
+  outputs:
+  - env_ok
+  checks:
+  - schema
+  - env_ok_is_true
+  on_fail:
+    retry: 0
+    then: stop
+  next:
+  - to: route_action
+- id: route_action
+  type: branch
+  goal: Split the request by action.
+  true: action
+  inputs:
+  - action
+  outputs:
+  - route
+  checks:
+  - schema
+  next:
+  - to: search_notes
+    label: action is search
+  - to: compose_note
+    label: action is create
+  - to: export_notes
+    label: action is export
+- id: search_notes
+  type: code
+  goal: Run a fuzzy memo search and return the matching notes.
+  script: checks/memo_search.sh
+  inputs:
+  - query
+  - folder
+  outputs:
+  - matches
+  checks:
+  - schema
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: report
+- id: compose_note
+  type: agent
+  goal: Draft a note title and body from the user's raw text. Do not write anything.
+  instructions: Read note_text and folder. Produce a short title and a body that keeps
+    every fact in note_text. Do not add facts. Do not call any tool. Return only the
+    schema fields.
+  inputs:
+  - note_text
+  - folder
+  tools: []
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - title
+    - body
+    - folder
+    properties:
+      title:
+        type: string
+      body:
+        type: string
+      folder:
+        type: string
+  outputs:
+  - draft
+  checks:
+  - schema
+  - grounded_in_input
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: approve_write
+- id: approve_write
+  type: code
+  goal: Show the draft note and the target folder to the user and stop unless they
+    explicitly approve the write.
+  script: checks/require_approval.py
+  inputs:
+  - draft
+  outputs:
+  - approved_draft
+  checks:
+  - human_approved
+  on_fail:
+    retry: 0
+    then: stop
+  next:
+  - to: create_note
+- id: create_note
+  type: code
+  goal: Create the approved note in Apple Notes using memo, then read it back.
+  script: checks/memo_add.sh
+  inputs:
+  - approved_draft
+  outputs:
+  - created_note
+  checks:
+  - schema
+  - readback_matches_title
+  on_fail:
+    retry: 0
+    then: stop
+  next:
+  - to: report
+- id: export_notes
+  type: code
+  goal: Prepare an export of the requested folder in the requested format.
+  script: checks/memo_export_plan.sh
+  inputs:
+  - folder
+  - export_format
+  outputs:
+  - export_plan
+  checks:
+  - schema
+  - format_is_html_or_markdown
+  next:
+  - to: approve_export
+- id: approve_export
+  type: code
+  goal: Show the export plan, including the output path, and stop unless the user
+    explicitly approves writing those files.
+  script: checks/require_approval.py
+  inputs:
+  - export_plan
+  outputs:
+  - approved_export
+  checks:
+  - human_approved
+  on_fail:
+    retry: 0
+    then: stop
+  next:
+  - to: run_export
+- id: run_export
+  type: code
+  goal: Run the approved memo export and return the output path.
+  script: checks/memo_export.sh
+  inputs:
+  - approved_export
+  outputs:
+  - export_path
+  checks:
+  - schema
+  - path_exists
+  on_fail:
+    retry: 0
+    then: stop
+  next:
+  - to: report
+- id: report
+  type: code
+  goal: Assemble the final answer from whichever branch ran.
+  script: checks/report.py
+  inputs:
+  - matches
+  - created_note
+  - export_path
+  outputs:
+  - final_answer
+  checks:
+  - schema

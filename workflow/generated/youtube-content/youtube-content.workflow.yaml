@@ -1,0 +1,221 @@
+name: youtube-content
+version: 0.1
+goal: Turn one YouTube video's transcript into the requested format (summary by default),
+  or report that no transcript is available.
+context_policy: fresh context per node; only the declared inputs are passed
+inputs:
+  video_url:
+    type: string
+    from: user
+    description: YouTube URL (watch, youtu.be, shorts, embed, live) or raw 11-character
+      video ID
+  output_format:
+    type: string
+    from: user
+    description: one of chapters, summary, chapter_summaries, thread, blog_post, quotes;
+      empty means summary
+  language:
+    type: string
+    from: user
+    description: optional language codes with fallback order, e.g. tr,en; empty means
+      default
+nodes:
+- id: fetch_transcript
+  type: code
+  goal: Fetch the transcript text with timestamps by running the helper script in
+    the prepared Python environment.
+  script: scripts/fetch_transcript.py
+  inputs:
+  - video_url
+  - language
+  outputs:
+  - transcript
+  - language_used
+  checks:
+  - schema
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: check_transcript
+- id: check_transcript
+  type: branch
+  goal: Route on whether the transcript came back empty.
+  true: transcript
+  inputs:
+  - transcript
+  outputs:
+  - transcript
+  checks:
+  - schema
+  next:
+  - to: fetch_any_language
+    label: transcript is empty
+  - to: chunk_transcript
+    label: transcript is non-empty
+- id: fetch_any_language
+  type: code
+  goal: Retry the fetch without a language filter to get any available transcript
+    and report its language.
+  script: scripts/fetch_transcript.py
+  inputs:
+  - video_url
+  outputs:
+  - transcript
+  - language_used
+  checks:
+  - schema
+  on_fail:
+    retry: 0
+    then: stop
+  next:
+  - to: check_fallback
+- id: check_fallback
+  type: branch
+  goal: Stop with an unavailable notice if even the fallback transcript is empty.
+  true: transcript
+  inputs:
+  - transcript
+  outputs:
+  - transcript
+  - language_used
+  checks:
+  - schema
+  next:
+  - to: report_unavailable
+    label: transcript still empty
+  - to: chunk_transcript
+    label: transcript found
+- id: report_unavailable
+  type: code
+  goal: Build a notice that the video has no usable transcript and suggest checking
+    the video page for subtitles.
+  script: scripts/unavailable_notice.py
+  inputs:
+  - video_url
+  outputs:
+  - result
+  checks:
+  - schema
+  next:
+  - to: present_result
+- id: chunk_transcript
+  type: code
+  goal: Split transcripts over 50K characters into chunks of about 40K characters
+    with 2K overlap; otherwise return a single chunk.
+  script: scripts/chunk_transcript.py
+  inputs:
+  - transcript
+  outputs:
+  - chunks
+  checks:
+  - schema
+  - non_empty
+  next:
+  - to: summarize_chunk
+- id: summarize_chunk
+  type: agent
+  for_each: chunks
+  goal: Condense one transcript chunk into timestamped notes that keep topic shifts,
+    key claims and notable quotes.
+  instructions: Read only the chunk text you are given. Keep every timestamp exactly
+    as it appears. Do not add facts that are not in the chunk. Return the notes as
+    a single string in notes.
+  inputs:
+  - item
+  tools: []
+  output_schema:
+    type: object
+    properties:
+      notes:
+        type: string
+    required:
+    - notes
+    additionalProperties: false
+  outputs:
+  - chunk_notes
+  checks:
+  - schema
+  - grounded_in_source
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: transform_output
+- id: transform_output
+  type: agent
+  goal: Write the requested output format from the chunk notes, defaulting to a 5-10
+    sentence summary.
+  instructions: 'Use output_format; if it is empty, use summary. Formats: chapters
+    (timestamped list of topic shifts), summary (5-10 sentences), chapter_summaries
+    (chapters with a short paragraph each), thread (numbered posts, each under 280
+    characters), blog_post (title, sections, key takeaways), quotes (notable quotes
+    with timestamps). If language_used differs from the requested language, state
+    the actual language. Do not add content beyond the notes. Return the body in body
+    and the language in language.'
+  inputs:
+  - chunk_notes
+  - output_format
+  - language_used
+  tools: []
+  output_schema:
+    type: object
+    properties:
+      body:
+        type: string
+      language:
+        type: string
+    required:
+    - body
+    - language
+    additionalProperties: false
+  outputs:
+  - draft_output
+  checks:
+  - schema
+  - grounded_in_source
+  - thread_posts_under_280_chars
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: verify_output
+- id: verify_output
+  type: agent
+  goal: Re-read the drafted output for coherence, correct timestamps and completeness
+    against the notes.
+  instructions: Confirm every timestamp in the draft appears in the notes, the draft
+    matches the requested format, and nothing is cut off. If a check fails, fix the
+    body minimally. Return the final text in body.
+  inputs:
+  - draft_output
+  - chunk_notes
+  tools: []
+  output_schema:
+    type: object
+    properties:
+      body:
+        type: string
+    required:
+    - body
+    additionalProperties: false
+  outputs:
+  - result
+  checks:
+  - schema
+  - grounded_in_source
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: present_result
+- id: present_result
+  type: code
+  goal: Print the final result as the answer to the user.
+  script: scripts/present_result.py
+  inputs:
+  - result
+  outputs:
+  - final_answer
+  checks:
+  - schema
