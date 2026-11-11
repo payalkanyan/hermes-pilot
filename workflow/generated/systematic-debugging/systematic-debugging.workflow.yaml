@@ -1,0 +1,385 @@
+name: systematic-debugging
+version: 0.1
+goal: Find the root cause of one bug through a tight red/green feedback loop, confirm
+  it with a minimal test, get user approval, then apply and verify one fix.
+context_policy: fresh context per node; only the declared inputs are passed
+inputs:
+  symptom:
+    type: string
+    from: user
+    description: exact bug symptom or failing command output
+  repo_path:
+    type: string
+    from: user
+    description: path to the codebase inside the sandbox
+nodes:
+- id: build_loop
+  type: agent
+  goal: Build or identify one tight command that goes red on the exact symptom.
+  instructions: Find or create one command that reproduces the exact symptom in repo_path.
+    Prefer a failing test, then a script or CLI call. Run it once. Set red to true
+    only if the output matches the symptom. Copy output_excerpt exactly from the tool
+    result. Do not read code to form a theory yet.
+  inputs:
+  - symptom
+  - repo_path
+  tools:
+  - terminal
+  - read_file
+  - search_files
+  output_schema:
+    type: object
+    properties:
+      command:
+        type: string
+      red:
+        type: boolean
+      output_excerpt:
+        type: string
+    required:
+    - command
+    - red
+    - output_excerpt
+    additionalProperties: false
+  outputs:
+  - loop
+  checks:
+  - schema
+  - loop_is_red
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: minimize_repro
+- id: minimize_repro
+  type: agent
+  goal: Shrink the failing reproduction to the smallest input that still goes red.
+  instructions: Remove one input, caller, config or step at a time. Re-run the loop
+    command after each cut. Keep a cut only if the loop stays red. Report the kept
+    inputs and whether the final command is still red. Copy results exactly from tool
+    output.
+  inputs:
+  - loop
+  - symptom
+  - repo_path
+  tools:
+  - terminal
+  - read_file
+  output_schema:
+    type: object
+    properties:
+      command:
+        type: string
+      kept_inputs:
+        type: array
+        items:
+          type: string
+      still_red:
+        type: boolean
+    required:
+    - command
+    - kept_inputs
+    - still_red
+    additionalProperties: false
+  outputs:
+  - minimal_repro
+  checks:
+  - schema
+  - still_red
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: gather_evidence
+- id: gather_evidence
+  type: agent
+  goal: Collect evidence showing where the failing value or state first goes wrong.
+  instructions: Use git log, git diff and search_files to find recent changes and
+    where the failing value originates. Trace upstream from the failure to the source.
+    Each finding must cite the file path and line, and the fact must be copied from
+    tool output. Do not propose fixes.
+  inputs:
+  - minimal_repro
+  - repo_path
+  tools:
+  - terminal
+  - read_file
+  - search_files
+  output_schema:
+    type: object
+    properties:
+      findings:
+        type: array
+        items:
+          type: object
+          properties:
+            source:
+              type: string
+            fact:
+              type: string
+          required:
+          - source
+          - fact
+          additionalProperties: false
+    required:
+    - findings
+    additionalProperties: false
+  outputs:
+  - evidence
+  checks:
+  - schema
+  - grounded_in_tool_results
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: form_hypotheses
+- id: form_hypotheses
+  type: agent
+  goal: Produce 3 to 5 ranked, falsifiable hypotheses, each with a prediction.
+  instructions: 'Rank hypotheses by likelihood and by how cheap they are to falsify.
+    For each, state: If X is the cause, then changing or observing Y should make Z
+    happen. Drop any hypothesis that does not make a testable prediction.'
+  inputs:
+  - evidence
+  - minimal_repro
+  tools:
+  - read_file
+  - search_files
+  output_schema:
+    type: object
+    properties:
+      hypotheses:
+        type: array
+        minItems: 1
+        items:
+          type: object
+          properties:
+            rank:
+              type: integer
+            cause:
+              type: string
+            prediction:
+              type: string
+            probe:
+              type: string
+          required:
+          - rank
+          - cause
+          - prediction
+          - probe
+          additionalProperties: false
+    required:
+    - hypotheses
+    additionalProperties: false
+  outputs:
+  - hypotheses
+  checks:
+  - schema
+  - each_has_prediction
+  next:
+  - to: test_hypotheses
+- id: test_hypotheses
+  type: agent
+  goal: Test hypotheses in ranked order, one variable at a time, and stop at the first
+    confirmed cause.
+  instructions: Test the highest-ranked hypothesis with the smallest probe. Change
+    one variable per probe. Revert every probe edit before the next probe. Mark a
+    hypothesis confirmed only if its prediction held in tool output. Stop after 3
+    probes at most. If none is confirmed, return outcome falsified or inconclusive.
+  inputs:
+  - hypotheses
+  - loop
+  - repo_path
+  tools:
+  - terminal
+  - read_file
+  output_schema:
+    type: object
+    properties:
+      outcome:
+        type: string
+        enum:
+        - confirmed
+        - falsified
+        - inconclusive
+      root_cause:
+        type: string
+      evidence:
+        type: string
+      tested_count:
+        type: integer
+    required:
+    - outcome
+    - root_cause
+    - evidence
+    - tested_count
+    additionalProperties: false
+  outputs:
+  - hypothesis_result
+  checks:
+  - schema
+  - probes_reverted
+  - at_most_3_probes
+  on_fail:
+    retry: 0
+    then: stop
+  next:
+  - to: route_hypothesis
+- id: route_hypothesis
+  type: branch
+  goal: Split on whether a root cause was confirmed.
+  true: hypothesis_result
+  inputs:
+  - hypothesis_result
+  outputs:
+  - confirmed_cause
+  - final_status
+  next:
+  - to: request_approval
+    label: outcome is confirmed
+  - to: report
+    label: outcome is falsified or inconclusive
+- id: request_approval
+  type: branch
+  goal: Ask the user to approve the confirmed root cause and the planned fix before
+    any file is written.
+  true: user_decision
+  inputs:
+  - confirmed_cause
+  outputs:
+  - approved_fix
+  - final_status
+  next:
+  - to: write_regression_test
+    label: user approves
+  - to: report
+    label: user declines
+- id: write_regression_test
+  type: agent
+  goal: Write the smallest failing regression test for the confirmed root cause.
+  instructions: Write one test that reproduces the minimal repro and asserts the exact
+    symptom. Run it and confirm it fails on the current code. Do not change production
+    code in this step.
+  inputs:
+  - approved_fix
+  - minimal_repro
+  - repo_path
+  tools:
+  - read_file
+  - write_file
+  - terminal
+  output_schema:
+    type: object
+    properties:
+      test_file:
+        type: string
+      test_name:
+        type: string
+      fails_before_fix:
+        type: boolean
+    required:
+    - test_file
+    - test_name
+    - fails_before_fix
+    additionalProperties: false
+  outputs:
+  - regression_test
+  checks:
+  - schema
+  - fails_before_fix
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: apply_fix
+- id: apply_fix
+  type: agent
+  goal: Apply the single approved fix at the root cause.
+  instructions: Make exactly one change, addressing the root cause only. No refactors
+    or unrelated cleanup. Report the files changed and a one-line summary.
+  inputs:
+  - approved_fix
+  - regression_test
+  - repo_path
+  tools:
+  - read_file
+  - patch
+  - terminal
+  output_schema:
+    type: object
+    properties:
+      files_changed:
+        type: array
+        items:
+          type: string
+      summary:
+        type: string
+    required:
+    - files_changed
+    - summary
+    additionalProperties: false
+  outputs:
+  - fix_summary
+  checks:
+  - schema
+  - single_root_cause_change
+  on_fail:
+    retry: 0
+    then: stop
+  next:
+  - to: verify_fix
+- id: verify_fix
+  type: agent
+  goal: Run the loop, the regression test and the full suite to confirm the fix.
+  instructions: Run the tight loop, the regression test, and the full test suite in
+    repo_path. Report each result exactly from tool output. Set status to verified
+    only if all three are green.
+  inputs:
+  - loop
+  - regression_test
+  - fix_summary
+  - repo_path
+  tools:
+  - terminal
+  output_schema:
+    type: object
+    properties:
+      status:
+        type: string
+        enum:
+        - verified
+        - not_verified
+      loop_result:
+        type: string
+      regression_result:
+        type: string
+      suite_result:
+        type: string
+    required:
+    - status
+    - loop_result
+    - regression_result
+    - suite_result
+    additionalProperties: false
+  outputs:
+  - final_status
+  checks:
+  - schema
+  - loop_green
+  - full_suite_green
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: report
+- id: report
+  type: code
+  goal: Assemble the final JSON answer.
+  script: checks/report.py
+  inputs:
+  - final_status
+  outputs:
+  - final_answer
+  checks:
+  - schema

@@ -74,7 +74,7 @@ def validate(spec):
 SHAPE = {"tool": ('[["', '"]]'), "agent": ('("', '")'), "code": ('["', '"]'), "branch": ('{"', '"}')}
 
 def mermaid(spec):
-    L = ["flowchart TD", '  start(["start: folder, month"])']
+    L = ["flowchart TD", f'  start(["start: {", ".join(spec.get("inputs", {})) or "inputs"}"])']
     for n in spec["nodes"]:
         a, b = SHAPE[n["type"]]
         loop = f"<br/>for each: {n['for_each']}" if n.get("for_each") else ""

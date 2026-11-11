@@ -1,0 +1,6 @@
+{"skill": "test-driven-development", "valid": true, "attempts": 2, "nodes": 6, "errors": [], "cost_usd": 0.0086}
+{"skill": "systematic-debugging", "valid": true, "attempts": 2, "nodes": 10, "errors": [], "cost_usd": 0.0069}
+{"skill": "simplify-code", "valid": true, "attempts": 2, "nodes": 9, "errors": [], "cost_usd": 0.0118}
+{"skill": "test-driven-development", "valid": true, "attempts": 1, "nodes": 8, "valid_first_try": true, "first_attempt_errors": [], "errors": [], "cost_usd": 0.0037}
+{"skill": "systematic-debugging", "valid": true, "attempts": 2, "nodes": 11, "valid_first_try": false, "first_attempt_errors": ["test_top_hypothesis: input 'loop' is not available at this point (not a workflow input or an earlier node's output)", "write_regression_test: input 'loop' is not available at this point (not a workflow input or an earlier node's output)", "verify_fix: input 'loop' is not available at this point (not a workflow input or an earlier node's output)"], "errors": [], "cost_usd": 0.0107}
+{"skill": "simplify-code", "valid": true, "attempts": 1, "nodes": 12, "valid_first_try": true, "first_attempt_errors": [], "errors": [], "cost_usd": 0.0054}

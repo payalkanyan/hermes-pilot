@@ -134,7 +134,7 @@ def run_workflow(spec, inputs, mode, usage_dir):
         node_usages = []
         try:
             if node["type"] == "agent":
-                schema = json.load(open(HERE / node["output_schema"]))
+                schema = node["output_schema"] if isinstance(node["output_schema"], dict) else json.load(open(HERE / node["output_schema"]))
                 with cf.ThreadPoolExecutor(max_workers=node.get("parallel", 1)) as ex:
                     res = list(ex.map(lambda it: run_agent_item(node, it, mode, schema, usage_dir, node_usages), items))
                 out = {node["outputs"][0]: res}
