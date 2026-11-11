@@ -1,199 +1,223 @@
 name: apple-notes
 version: 0.1
-goal: Search, create, or export Apple Notes through the memo CLI on macOS, with human
-  approval before any note is written or exported.
+goal: Run one Apple Notes operation through the memo CLI after the user approves the
+  exact command, or report why it was not run.
 context_policy: fresh context per node; only the declared inputs are passed
+tools_provided:
+- clarify
+check_descriptions:
+  approval_recorded: The approval field is exactly "approved" or "declined", taken
+    from the user's reply to the approval question.
+  memo_command_is_documented: The command starts with "memo notes" and uses only the
+    flags -f, -s, -a, -e, -d, -m and -ex; any value after -f or -s is quoted; -a is
+    never given a title argument.
+  interactive_flag_matches: needs_pty is true when the command uses -a, -e, -d or
+    -m, and false otherwise.
+  prereq_macos_memo_present: The terminal output shows Darwin as the OS and a path
+    for memo, and the exit code is 0.
+  exit_code_zero: The tool result reports exit code 0 with no error text from memo.
 inputs:
-  action:
+  request:
     type: string
     from: user
-    description: 'one of: search, create, export'
-  query:
-    type: string
-    from: user
-    description: search text, used when action is search
+    description: What the user wants to do with Apple Notes, in their own words.
   folder:
     type: string
     from: user
-    description: Notes folder name, optional
-  note_text:
-    type: string
-    from: user
-    description: raw content for a new note, used when action is create
-  export_format:
-    type: string
-    from: user
-    description: html or markdown, used when action is export
+    description: Optional Notes folder name to target. Empty string if none.
 nodes:
-- id: preflight
-  type: code
-  goal: Confirm the host is macOS, memo is installed, and Notes automation is available.
-  script: checks/preflight_memo.sh
-  inputs: []
-  outputs:
-  - env_ok
-  checks:
-  - schema
-  - env_ok_is_true
-  on_fail:
-    retry: 0
-    then: stop
-  next:
-  - to: route_action
-- id: route_action
-  type: branch
-  goal: Split the request by action.
-  true: action
-  inputs:
-  - action
-  outputs:
-  - route
-  checks:
-  - schema
-  next:
-  - to: search_notes
-    label: action is search
-  - to: compose_note
-    label: action is create
-  - to: export_notes
-    label: action is export
-- id: search_notes
-  type: code
-  goal: Run a fuzzy memo search and return the matching notes.
-  script: checks/memo_search.sh
-  inputs:
-  - query
-  - folder
-  outputs:
-  - matches
-  checks:
-  - schema
-  on_fail:
-    retry: 1
-    then: stop
-  next:
-  - to: report
-- id: compose_note
+- id: classify_request
   type: agent
-  goal: Draft a note title and body from the user's raw text. Do not write anything.
-  instructions: Read note_text and folder. Produce a short title and a body that keeps
-    every fact in note_text. Do not add facts. Do not call any tool. Return only the
-    schema fields.
+  goal: Decide whether the request belongs in Apple Notes and which memo operation
+    it needs.
+  instructions: 'Read the request. Set applies_to_apple_notes to false if the user
+    wants an Obsidian vault (use the obsidian skill), Bear Notes, or a quick agent-only
+    note (use the memory tool). Otherwise set it to true when the user prefers Apple
+    Notes for cross-device sync. Pick exactly one operation: view, search, create,
+    edit, delete, move, export, or none. Put the folder name in folder and any search
+    text in query; use empty strings when not given. Give a one-sentence reason.'
   inputs:
-  - note_text
+  - request
   - folder
   tools: []
   output_schema:
     type: object
-    additionalProperties: false
-    required:
-    - title
-    - body
-    - folder
     properties:
-      title:
+      applies_to_apple_notes:
+        type: boolean
+      operation:
         type: string
-      body:
-        type: string
+        enum:
+        - view
+        - search
+        - create
+        - edit
+        - delete
+        - move
+        - export
+        - none
       folder:
         type: string
+      query:
+        type: string
+      reason:
+        type: string
+    required:
+    - applies_to_apple_notes
+    - operation
+    - folder
+    - query
+    - reason
+    additionalProperties: false
   outputs:
-  - draft
+  - operation_plan
   checks:
   - schema
-  - grounded_in_input
+  - non_empty
   on_fail:
     retry: 1
     then: stop
   next:
-  - to: approve_write
-- id: approve_write
-  type: code
-  goal: Show the draft note and the target folder to the user and stop unless they
-    explicitly approve the write.
-  script: checks/require_approval.py
+  - to: route_scope
+- id: route_scope
+  type: branch
+  goal: Send out-of-scope requests straight to the report and continue in-scope ones.
+  condition: operation_plan.applies_to_apple_notes is true and operation is not none
   inputs:
-  - draft
+  - operation_plan
   outputs:
-  - approved_draft
-  checks:
-  - human_approved
-  on_fail:
-    retry: 0
-    then: stop
+  - operation_plan
   next:
-  - to: create_note
-- id: create_note
-  type: code
-  goal: Create the approved note in Apple Notes using memo, then read it back.
-  script: checks/memo_add.sh
+  - to: compose_command
+    label: applies to Apple Notes and operation is set
+  - to: report_result
+    label: out of scope or operation is none
+- id: compose_command
+  type: agent
+  goal: Build the one memo command that performs the planned operation.
+  instructions: 'Use only these forms: memo notes (view), memo notes -f "<folder>"
+    (filter), memo notes -s "<query>" (search), memo notes -a (create; add -f "<folder>"
+    to target a folder; -a takes no title), memo notes -e (edit, interactive selection),
+    memo notes -d (delete, interactive selection), memo notes -m (move, interactive),
+    memo notes -ex (export). Set needs_pty to true for -a, -e, -d and -m. For create,
+    set editor_note to remind the user that $EDITOR must be set (for example export
+    EDITOR=vim) before running. Do not add any other flags or commands.'
   inputs:
-  - approved_draft
+  - operation_plan
+  tools: []
+  output_schema:
+    type: object
+    properties:
+      command:
+        type: string
+      needs_pty:
+        type: boolean
+      editor_note:
+        type: string
+    required:
+    - command
+    - needs_pty
+    - editor_note
+    additionalProperties: false
   outputs:
-  - created_note
-  checks:
-  - schema
-  - readback_matches_title
-  on_fail:
-    retry: 0
-    then: stop
-  next:
-  - to: report
-- id: export_notes
-  type: code
-  goal: Prepare an export of the requested folder in the requested format.
-  script: checks/memo_export_plan.sh
-  inputs:
-  - folder
-  - export_format
-  outputs:
-  - export_plan
-  checks:
-  - schema
-  - format_is_html_or_markdown
-  next:
-  - to: approve_export
-- id: approve_export
-  type: code
-  goal: Show the export plan, including the output path, and stop unless the user
-    explicitly approves writing those files.
-  script: checks/require_approval.py
-  inputs:
-  - export_plan
-  outputs:
-  - approved_export
-  checks:
-  - human_approved
-  on_fail:
-    retry: 0
-    then: stop
-  next:
-  - to: run_export
-- id: run_export
-  type: code
-  goal: Run the approved memo export and return the output path.
-  script: checks/memo_export.sh
-  inputs:
-  - approved_export
-  outputs:
-  - export_path
+  - command_plan
   checks:
   - schema
-  - path_exists
+  - memo_command_is_documented
+  - interactive_flag_matches
   on_fail:
-    retry: 0
+    retry: 1
     then: stop
   next:
-  - to: report
-- id: report
-  type: code
-  goal: Assemble the final answer from whichever branch ran.
-  script: checks/report.py
+  - to: approve_command
+- id: approve_command
+  type: tool
+  goal: Show the user the exact command and ask whether to run it.
+  tool: clarify
+  instructions: 'Ask: Run this Apple Notes command? Show the command text and the
+    editor note. Accept only yes or no. Map yes to approved and no to declined.'
   inputs:
-  - matches
-  - created_note
-  - export_path
+  - command_plan
+  outputs:
+  - approval
+  checks:
+  - approval_recorded
+  on_fail:
+    retry: 0
+    then: report_result
+  next:
+  - to: route_approval
+- id: route_approval
+  type: branch
+  goal: Run the command only if the user approved it.
+  condition: approval is "approved"
+  inputs:
+  - approval
+  outputs:
+  - approval
+  next:
+  - to: check_prereqs
+    label: approved
+  - to: report_result
+    label: declined
+- id: check_prereqs
+  type: tool
+  goal: Confirm the machine is macOS and memo is installed.
+  tool: terminal
+  instructions: 'Run: uname -s && command -v memo. Report the output and exit code.'
+  inputs: []
+  outputs:
+  - prereq_status
+  checks:
+  - prereq_macos_memo_present
+  on_fail:
+    retry: 0
+    then: report_result
+  next:
+  - to: route_prereq
+- id: route_prereq
+  type: branch
+  goal: Continue only when the prerequisites pass.
+  condition: prereq_status shows Darwin and a memo path
+  inputs:
+  - prereq_status
+  outputs:
+  - prereq_status
+  next:
+  - to: run_memo
+    label: prerequisites pass
+  - to: report_result
+    label: macOS or memo missing
+- id: run_memo
+  type: tool
+  goal: Run the approved memo command and capture its output.
+  tool: terminal
+  instructions: Run command_plan.command exactly as given. If needs_pty is true, run
+    it in a pty. Capture stdout, stderr and the exit code. Notes with images or attachments
+    cannot be edited; report that if memo says so.
+  inputs:
+  - command_plan
+  outputs:
+  - memo_output
+  checks:
+  - grounded_in_tool_results
+  - exit_code_zero
+  on_fail:
+    retry: 0
+    then: report_result
+  next:
+  - to: report_result
+- id: report_result
+  type: code
+  goal: 'Assemble the final answer: the result, or the reason nothing was run.'
+  script: checks/report_result.py
+  inputs:
+  - operation_plan
+  - approval
+  - prereq_status
+  - memo_output
   outputs:
   - final_answer
   checks:
   - schema
+  - non_empty

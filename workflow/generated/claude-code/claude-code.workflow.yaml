@@ -1,187 +1,282 @@
 name: claude-code-delegation
 version: 0.1
-goal: Run one coding task through the Claude Code CLI in print mode inside a git repo,
-  only after explicit approval, then verify the changes and report what happened.
+goal: Delegate one coding task to the Claude Code CLI in a project directory, in print
+  mode for one-shot work or interactive tmux mode for multi-turn work, gated by a
+  command review and a login check, and report the result.
 context_policy: fresh context per node; only the declared inputs are passed
+tools_provided:
+- tmux
 inputs:
-  repo_path:
-    type: string
-    from: user
-    description: absolute path to the git repository the task applies to
   task:
     type: string
     from: user
-    description: the coding task to hand to Claude Code
-    in plain language: null
-  user_decision:
+    description: The coding task to delegate to Claude Code, in plain language.
+  project_dir:
     type: string
     from: user
-    description: yes or no, given in this run after reviewing the run_command shown
-      by the approval gate
+    description: Absolute path of the project directory Claude Code should work in.
+  isolated_worktree:
+    type: boolean
+    from: user
+    description: True only if the run happens in a throwaway git worktree or isolated
+      container, which permits bypassing permission prompts.
+check_descriptions:
+  no_bypass_flag: The invocation contains no --dangerously-skip-permissions flag and
+    no bypassPermissions mode, unless the isolated_worktree input is true.
+  has_turn_limit: The invocation includes --max-turns for print mode, or an explicit
+    reason is given for omitting it.
+  mode_justified: The invocation sets mode to print unless the task needs multi-turn
+    iteration, human decisions, or slash commands, and then states that reason.
+  review_covers_flags: The review lists every flag and allowed tool in the invocation
+    and sets approved to true or false with a reason.
+  auth_logged_in: The prerequisite output shows the claude binary is installed and
+    the auth status reports a logged-in account.
+  run_result_has_subtype: The run result includes a subtype field such as success
+    or error_max_turns, or the transcript shows the final status.
+  prompts_read_before_answer: Every keystroke sent to answer a dialog follows a captured
+    pane that shows that dialog.
+  no_blind_enter: No Enter key was sent to the tmux session without a captured pane
+    showing the prompt it answers.
+  reasons_are_bare_codes: Each reason in the final answer is a bare code without prose.
 nodes:
-- id: preflight
-  type: code
-  goal: Check that the claude CLI is installed and logged in, and that repo_path is
-    a git repository.
-  script: scripts/claude_preflight.py
-  inputs:
-  - repo_path
-  outputs:
-  - preflight_report
-  checks:
-  - schema
-  - claude_version_present
-  - auth_status_parsed
-  - is_git_repo
-  on_fail:
-    retry: 0
-    then: stop
-  next:
-  - to: check_ready
-- id: check_ready
-  type: branch
-  goal: Continue only if the preflight report says Claude Code is installed, authenticated
-    and the path is a git repo.
-  true: preflight_report
-  inputs:
-  - preflight_report
-  outputs:
-  - preflight_report
-  next:
-  - to: build_command
-    label: preflight passed
-  - to: report
-    label: preflight failed
-- id: build_command
-  type: code
-  goal: Build one print-mode claude command with an explicit tool allowlist and a
-    turn limit. Never use bypass flags.
-  script: scripts/build_claude_command.py
+- id: plan_invocation
+  type: agent
+  goal: Choose print or interactive mode and compose the claude command for the task.
+  instructions: Read the project's CLAUDE.md and relevant files with read_file and
+    search_files to scope the task. Prefer print mode (claude -p) for one-shot tasks,
+    CI-style automation, structured extraction, or piped input. Use interactive mode
+    (tmux session running claude) only for multi-turn iteration, human-in-the-loop
+    decisions, or slash commands like /compact or /review. Print mode always includes
+    --max-turns and --output-format json. Use --allowedTools with the smallest set
+    (for example Read,Edit or Read,Bash) and never add --dangerously-skip-permissions
+    unless isolated_worktree is true. Use --permission-mode acceptEdits only inside
+    a dedicated worktree. Record the working directory as project_dir.
   inputs:
   - task
-  - repo_path
-  outputs:
-  - run_command
-  checks:
-  - schema
-  - print_mode_only
-  - no_skip_permissions_flag
-  - has_max_turns
-  next:
-  - to: approval_gate
-- id: approval_gate
-  type: branch
-  goal: Proceed to the write step only if the user explicitly approved the exact run_command.
-  true: user_decision
-  inputs:
-  - run_command
-  - user_decision
-  outputs:
-  - run_decision
-  next:
-  - to: run_claude
-    label: user approved
-  - to: report
-    label: user declined or unclear
-- id: run_claude
-  type: code
-  goal: Execute the approved claude -p command in repo_path with JSON output and return
-    the parsed result.
-  script: scripts/run_claude_print.py
-  inputs:
-  - run_command
-  - repo_path
-  outputs:
-  - claude_result
-  checks:
-  - schema
-  - json_parsed
-  - subtype_reported
-  on_fail:
-    retry: 0
-    then: stop
-  next:
-  - to: verify_result
-- id: verify_result
-  type: code
-  goal: Read git status and diff statistics for repo_path after the run, without changing
-    anything.
-  script: scripts/verify_changes.py
-  inputs:
-  - claude_result
-  - repo_path
-  outputs:
-  - verification
-  checks:
-  - schema
-  - git_read_only
-  next:
-  - to: review_diff
-- id: review_diff
-  type: agent
-  goal: Review the changed files for bugs, security problems and missing tests, quoting
-    only what the tools return.
-  instructions: Use read_file and search_files to inspect the files listed in verification.changed_files
-    inside repo_path. Do not edit anything. Report only issues you can point to in
-    a specific file and line. If a file cannot be read, add that to issues rather
-    than guessing its contents.
+  - project_dir
+  - isolated_worktree
   tools:
   - read_file
   - search_files
-  inputs:
-  - task
-  - repo_path
-  - verification
   output_schema:
     type: object
-    additionalProperties: false
-    required:
-    - verdict
-    - issues
     properties:
-      verdict:
+      mode:
         type: string
         enum:
-        - looks_good
-        - needs_changes
-        - unverified
-      issues:
+        - print
+        - interactive
+      mode_reason:
+        type: string
+      command:
+        type: string
+      allowed_tools:
         type: array
         items:
-          type: object
-          additionalProperties: false
-          required:
-          - file
-          - detail
-          properties:
-            file:
-              type: string
-            detail:
-              type: string
+          type: string
+      max_turns:
+        type: integer
+      permission_mode:
+        type: string
+      working_dir:
+        type: string
+    required:
+    - mode
+    - mode_reason
+    - command
+    - allowed_tools
+    - max_turns
+    - permission_mode
+    - working_dir
+    additionalProperties: false
+  outputs:
+  - invocation
+  checks:
+  - schema
+  - non_empty
+  - no_bypass_flag
+  - has_turn_limit
+  - mode_justified
+  on_fail:
+    retry: 1
+    then: report
+  next:
+  - to: review_invocation
+- id: review_invocation
+  type: agent
+  goal: Review the composed command for unsafe flags or scope before anything runs.
+  instructions: List every flag and every allowed tool in the invocation. Flag any
+    bypass of permissions, any tool outside the task's scope, any command that writes
+    outside working_dir, and any missing turn limit. Set approved to true only if
+    the command is safe and in scope.
+  inputs:
+  - invocation
+  tools:
+  - read_file
+  output_schema:
+    type: object
+    properties:
+      approved:
+        type: boolean
+      flags_listed:
+        type: array
+        items:
+          type: string
+      reason:
+        type: string
+    required:
+    - approved
+    - flags_listed
+    - reason
+    additionalProperties: false
   outputs:
   - review
   checks:
   - schema
-  - grounded_in_tool_results
+  - non_empty
+  - review_covers_flags
   on_fail:
     retry: 1
-    then: stop
+    then: report
+  next:
+  - to: gate_review
+- id: gate_review
+  type: branch
+  goal: Stop unless the command review approved the invocation.
+  condition: review.approved is true
+  inputs:
+  - review
+  outputs:
+  - gate_result
+  next:
+  - to: check_prereqs
+    label: approved
+  - to: report
+    label: not approved
+- id: check_prereqs
+  type: tool
+  goal: Confirm the claude binary is installed and that the auth status shows a logged-in
+    account.
+  tool: terminal
+  command: claude --version && claude auth status --text
+  inputs:
+  - invocation
+  outputs:
+  - prereq_status
+  checks:
+  - schema
+  - non_empty
+  - auth_logged_in
+  on_fail:
+    retry: 0
+    then: report
+  next:
+  - to: gate_prereqs
+- id: gate_prereqs
+  type: branch
+  goal: Continue only when the prerequisite check shows a logged-in account.
+  condition: prereq_status shows claude installed and logged in
+  inputs:
+  - prereq_status
+  outputs:
+  - prereq_gate
+  next:
+  - to: gate_mode
+    label: logged in
+  - to: report
+    label: not logged in
+- id: gate_mode
+  type: branch
+  goal: Route to print mode or interactive tmux mode based on the invocation.
+  condition: invocation.mode is print
+  inputs:
+  - invocation
+  outputs:
+  - mode_route
+  next:
+  - to: run_print
+    label: mode is print
+  - to: run_interactive
+    label: mode is interactive
+- id: run_print
+  type: tool
+  goal: Run the approved claude -p command once in the project directory and capture
+    its JSON output.
+  tool: terminal
+  workdir: project_dir
+  command: invocation.command
+  inputs:
+  - invocation
+  - project_dir
+  outputs:
+  - run_result
+  checks:
+  - schema
+  - non_empty
+  - run_result_has_subtype
+  on_fail:
+    retry: 0
+    then: report
+  next:
+  - to: report
+- id: run_interactive
+  type: agent
+  goal: Run the approved task in an interactive Claude Code session inside tmux and
+    collect the final status.
+  instructions: Create a tmux session sized 140x40, cd to project_dir, and start claude.
+    Handle the workspace trust dialog by capturing the pane and then pressing Enter
+    for the default Yes. For each later permission prompt, capture the pane with tmux
+    capture-pane -p -S -30, read it, and answer only that prompt (Enter for Yes, Esc
+    to decline). Never send a blind Enter on a timer. Send the task with send-keys,
+    monitor with capture-pane, send follow-ups as needed, and exit with /exit when
+    done. Never use --dangerously-skip-permissions here.
+  inputs:
+  - invocation
+  - project_dir
+  tools:
+  - terminal
+  output_schema:
+    type: object
+    properties:
+      session_name:
+        type: string
+      final_status:
+        type: string
+      subtype:
+        type: string
+      transcript_tail:
+        type: string
+    required:
+    - session_name
+    - final_status
+    - subtype
+    - transcript_tail
+    additionalProperties: false
+  outputs:
+  - run_result
+  checks:
+  - schema
+  - non_empty
+  - run_result_has_subtype
+  - prompts_read_before_answer
+  - no_blind_enter
+  on_fail:
+    retry: 0
+    then: report
   next:
   - to: report
 - id: report
   type: code
-  goal: Assemble the final JSON answer. If an earlier output is absent, the step did
-    not run and must be reported as such.
-  script: scripts/report.py
+  goal: Assemble the final JSON answer with the mode, the command run, and the outcome
+    or the stop reason.
+  script: checks/report_claude_code.py
   inputs:
-  - preflight_report
-  - run_decision
-  - claude_result
-  - verification
+  - invocation
+  - run_result
   - review
+  - prereq_status
   outputs:
   - final_answer
   checks:
   - schema
-  - absent_steps_marked_not_run
-  - no_claims_beyond_tool_output
+  - reasons_are_bare_codes

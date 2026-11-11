@@ -1,114 +1,212 @@
 name: dogfood
 version: 0.1
-goal: Explore a web app for bugs, collect screenshot evidence, and write a structured
-  QA report after human approval.
+goal: Run systematic exploratory QA of a web app in the browser, de-duplicate and
+  rate the issues, and write a cited bug report to the output directory after the
+  user approves the test plan.
 context_policy: fresh context per node; only the declared inputs are passed
+tools_provided:
+- clarify
 inputs:
   target_url:
     type: string
     from: user
-    description: entry point URL to test
+    description: Entry point URL of the web app to test
   scope:
     type: string
     from: user
-    description: areas to focus on, or 'full site'
+    description: Areas or features to focus on, or 'full site' for comprehensive testing
   output_dir:
     type: string
     from: user
-    description: where screenshots and report.md are saved (default ./dogfood-output)
+    description: Directory for screenshots and report.md (default ./dogfood-output)
+check_descriptions:
+  approval_recorded: The output has approved set to true or false and the edits field
+    is a string, with the user's reply copied verbatim in edits when they asked for
+    changes.
+  sitemap_from_fetched_page: Every page entry in the output has a url that appears
+    in the web_extract result or is the target URL, and the feature and kind fields
+    are filled.
+  screenshots_dir_exists: The terminal output shows the mkdir succeeded and the test
+    -d check on output_dir/screenshots printed ok.
+  console_hook_registered: The browser_exec output shows the console error hook was
+    registered before goto_url, and console_errors lists the values read from window.__qa_errors
+    after load.
+  interactions_exercised: The tested list names each interaction class run (clicks
+    on buttons and links, form fills with valid and invalid input, empty form submission,
+    Tab and Enter keyboard navigation, scrolling, history back) or explains in not_tested
+    why it was skipped.
+  evidence_saved: Every issue has a non-empty screenshot_path that lies under output_dir/screenshots
+    and a url, steps, expected and actual value.
+  issues_deduplicated_sorted: Issues describing the same bug are merged with merged_from
+    listing the source items, the list is sorted Critical then High then Medium then
+    Low, every issue has a severity and category from the taxonomy, and counts match
+    the list.
+  report_complete: 'The markdown has an executive summary with total and per-severity
+    counts and scope, one section per issue with URL, severity, category, steps, expected
+    vs actual, console errors and a MEDIA: line for the screenshot, a summary table,
+    and testing notes naming what was not tested; if no testing ran it says so.'
+  file_written: The write_file result reports verified true for output_dir/report.md.
 nodes:
-- id: setup_output
-  type: code
-  goal: Create the output directory structure and return its paths.
-  script: checks/setup_output.py
-  inputs:
-  - output_dir
-  outputs:
-  - output_paths
-  checks:
-  - schema
-  - dirs_exist
-  next:
-  - to: plan_tests
-- id: plan_tests
+- id: plan_scope
   type: agent
-  goal: Build a rough sitemap and a list of test items covering the scope.
-  instructions: Using browser_exec, open target_url and list the navigation links,
-    forms, and key user flows. Restrict the plan to the scope. Include edge cases
-    such as empty states, 404s, and form validation. Return one test item per page
-    or feature. Do not invent pages that were not seen.
+  goal: Build a rough sitemap of pages and features to test within the user's scope.
+  instructions: 'Call web_extract on target_url to read the landing page and its header,
+    footer and sidebar navigation links. Plan pages for: landing/home, navigation
+    links, key user flows (sign up, login, search, checkout as relevant), forms and
+    interactive elements, and edge cases (empty states, error pages, 404s). Only include
+    URLs that are the target URL or appear in the fetched page; for edge cases you
+    may construct a 404 URL on the same origin. Restrict the list to the scope. Do
+    not browse yet.'
+  tools:
+  - web_extract
   inputs:
   - target_url
   - scope
-  tools:
-  - browser_exec
   output_schema:
     type: object
-    additionalProperties: false
-    required:
-    - test_plan
     properties:
-      test_plan:
+      pages:
         type: array
         items:
           type: object
-          additionalProperties: false
-          required:
-          - name
-          - url
           properties:
-            name:
+            page_id:
               type: string
             url:
               type: string
+            feature:
+              type: string
+            kind:
+              type: string
+              enum:
+              - landing
+              - navigation
+              - flow
+              - form
+              - edge_case
+          required:
+          - page_id
+          - url
+          - feature
+          - kind
+          additionalProperties: false
+    required:
+    - pages
+    additionalProperties: false
   outputs:
-  - test_plan
+  - pages
   checks:
   - schema
   - non_empty
+  - sitemap_from_fetched_page
   on_fail:
     retry: 1
     then: stop
   next:
-  - to: explore_pages
-- id: explore_pages
+  - to: approve_plan
+- id: approve_plan
   type: agent
-  for_each: test_plan
-  parallel: 4
-  goal: Test one page or feature, capture console errors and screenshots, and record
-    every issue found.
-  instructions: Install the console hook, navigate to the item url, and read the page
-    structure. Click, fill, and submit the interactive elements, checking window.__qa_errors
-    and taking a screenshot after each interaction. Save screenshots under output_paths.screenshots.
-    Copy values exactly from tool results. Never guess. Each issue needs url, steps,
-    expected, actual, console errors, screenshot path, severity, and category.
-  inputs:
-  - item
-  - target_url
-  - output_paths
+  goal: Ask the user to approve the test plan before any browser code runs.
+  instructions: 'Use clarify to show the user the sitemap (page_id, url, feature,
+    kind for each page) and the scope, and ask: approve this plan to start browser
+    testing, or list edits. Return approved true only if the user clearly approves.
+    Copy the user''s reply into edits.'
   tools:
-  - browser_exec
+  - clarify
+  inputs:
+  - pages
+  - scope
   output_schema:
     type: object
-    additionalProperties: false
-    required:
-    - issues
     properties:
+      approved:
+        type: boolean
+      edits:
+        type: string
+    required:
+    - approved
+    - edits
+    additionalProperties: false
+  outputs:
+  - approval
+  checks:
+  - schema
+  - approval_recorded
+  on_fail:
+    retry: 0
+    then: stop
+  next:
+  - to: gate_approval
+- id: gate_approval
+  type: branch
+  goal: Route to browser testing only when the user approved the plan.
+  condition: approval.approved is true
+  inputs:
+  - approval
+  outputs: []
+  next:
+  - to: create_output_dirs
+    label: approved
+  - to: assemble_report
+    label: 'not approved: report that no testing ran'
+- id: create_output_dirs
+  type: tool
+  goal: Create the screenshots folder inside the output directory.
+  tool: terminal
+  instructions: 'Run: mkdir -p OUTPUT_DIR/screenshots && test -d OUTPUT_DIR/screenshots
+    && echo ok, with OUTPUT_DIR set to the output_dir input.'
+  inputs:
+  - output_dir
+  outputs:
+  - output_dir_ready
+  checks:
+  - screenshots_dir_exists
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: explore_page
+- id: explore_page
+  type: agent
+  for_each: pages
+  parallel: 3
+  goal: Explore one page or feature in the browser, test its interactions, capture
+    evidence for each issue, and record what was and was not tested.
+  instructions: 'Step 1: in one browser_exec call, register the console hook with
+    cdp(''Page.addScriptToEvaluateOnNewDocument'') before navigating (use new_tab(''about:blank'')
+    first on the first call), then goto_url(item.url), wait_for_load(), print page_info()
+    and js(''window.__qa_errors || []''). Re-register the hook at the start of any
+    later call that navigates. Step 2: list visible interactive elements with js()
+    and their centres. Step 3: capture_screenshot() and inspect the image for layout
+    problems, broken elements and accessibility concerns. Step 4: test every interactive
+    element: click buttons and links, fill forms with valid and invalid input, submit
+    empty forms, Tab and Enter keyboard navigation with cdp Input.dispatchKeyEvent
+    (keyDown and keyUp, windowsVirtualKeyCode 9 and 13), scroll with window.scrollBy(0,
+    800), history.back() then wait_for_load(). Also try long text and special characters,
+    and rapid clicks where relevant. Step 5: after each interaction read console errors,
+    take a screenshot when visuals change, and compare actual with expected. For each
+    issue, copy the screenshot into output_dir/screenshots with a descriptive name
+    such as issue-03-broken-login.png. Do not report an issue you did not observe.'
+  tools:
+  - browser_exec
+  inputs:
+  - item
+  - output_dir
+  output_schema:
+    type: object
+    properties:
+      page_id:
+        type: string
+      url:
+        type: string
+      console_errors:
+        type: array
+        items:
+          type: string
       issues:
         type: array
         items:
           type: object
-          additionalProperties: false
-          required:
-          - title
-          - url
-          - steps
-          - expected
-          - actual
-          - console_errors
-          - screenshot
-          - severity
-          - category
           properties:
             title:
               type: string
@@ -126,7 +224,71 @@ nodes:
               type: array
               items:
                 type: string
-            screenshot:
+            screenshot_path:
+              type: string
+          required:
+          - title
+          - url
+          - steps
+          - expected
+          - actual
+          - console_errors
+          - screenshot_path
+          additionalProperties: false
+      tested:
+        type: array
+        items:
+          type: string
+      not_tested:
+        type: array
+        items:
+          type: string
+    required:
+    - page_id
+    - url
+    - console_errors
+    - issues
+    - tested
+    - not_tested
+    additionalProperties: false
+  outputs:
+  - page_results
+  checks:
+  - schema
+  - grounded_in_tool_results
+  - console_hook_registered
+  - interactions_exercised
+  - evidence_saved
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: categorize_issues
+- id: categorize_issues
+  type: agent
+  goal: De-duplicate the issues, assign severity and category from the taxonomy, and
+    sort them.
+  instructions: Call skill_view with name dogfood and file_path references/issue-taxonomy.md
+    and use its severity and category definitions. Merge issues that are the same
+    bug in different places, recording the source titles in merged_from. Assign one
+    severity (Critical, High, Medium, Low) and one category (Functional, Visual, Accessibility,
+    Console, UX, Content) to each issue. Sort Critical first, then High, Medium, Low.
+    Count issues per severity. Do not invent issues that are not in page_results.
+  tools:
+  - skill_view
+  inputs:
+  - page_results
+  output_schema:
+    type: object
+    properties:
+      issues:
+        type: array
+        items:
+          type: object
+          properties:
+            title:
+              type: string
+            url:
               type: string
             severity:
               type: string
@@ -144,145 +306,123 @@ nodes:
               - Console
               - UX
               - Content
-  outputs:
-  - raw_findings
-  checks:
-  - schema
-  - grounded_in_tool_results
-  on_fail:
-    retry: 1
-    then: stop
-  next:
-  - to: merge_findings
-- id: merge_findings
-  type: code
-  goal: Flatten the per-page findings into one list of issues.
-  script: checks/merge_findings.py
-  inputs:
-  - raw_findings
-  outputs:
-  - issues
-  checks:
-  - schema
-  next:
-  - to: dedupe_classify
-- id: dedupe_classify
-  type: code
-  goal: Merge duplicate issues, sort by severity, and count issues by severity and
-    category.
-  script: checks/dedupe_classify.py
-  inputs:
-  - issues
-  outputs:
-  - sorted_issues
-  - issue_counts
-  checks:
-  - schema
-  - counts_match_issues
-  next:
-  - to: collect_evidence
-- id: collect_evidence
-  type: agent
-  for_each: sorted_issues
-  goal: Copy one issue's screenshot into the report screenshots folder under a descriptive
-    name.
-  instructions: Using browser_exec, copy item.screenshot into output_paths.screenshots
-    with a name like issue-NN-slug.png. Confirm the file exists. Return the new path.
-    Do not modify the screenshot.
-  inputs:
-  - item
-  - output_paths
-  tools:
-  - browser_exec
-  output_schema:
-    type: object
-    additionalProperties: false
+            steps:
+              type: array
+              items:
+                type: string
+            expected:
+              type: string
+            actual:
+              type: string
+            console_errors:
+              type: array
+              items:
+                type: string
+            screenshot_path:
+              type: string
+            merged_from:
+              type: array
+              items:
+                type: string
+          required:
+          - title
+          - url
+          - severity
+          - category
+          - steps
+          - expected
+          - actual
+          - console_errors
+          - screenshot_path
+          - merged_from
+          additionalProperties: false
+      counts:
+        type: object
+        properties:
+          total:
+            type: integer
+          critical:
+            type: integer
+          high:
+            type: integer
+          medium:
+            type: integer
+          low:
+            type: integer
+        required:
+        - total
+        - critical
+        - high
+        - medium
+        - low
+        additionalProperties: false
     required:
-    - evidence_path
-    properties:
-      evidence_path:
-        type: string
+    - issues
+    - counts
+    additionalProperties: false
   outputs:
-  - evidence_refs
+  - issues
+  - counts
   checks:
   - schema
-  - file_exists
+  - issues_deduplicated_sorted
   on_fail:
     retry: 1
     then: stop
   next:
-  - to: draft_report
-- id: draft_report
+  - to: assemble_report
+- id: assemble_report
   type: agent
-  goal: Write the markdown QA report from the sorted issues and evidence paths.
-  instructions: Follow the dogfood report template. Include an executive summary with
-    total and per-severity counts, per-issue sections with reproduction steps, expected
-    vs actual behavior, and MEDIA screenshot references, a summary table, and testing
-    notes. Use only the provided issues. Do not add facts.
+  goal: Write the bug report markdown following the skill's report template, or a
+    short note if no testing ran.
+  instructions: Call skill_view with name dogfood and file_path templates/dogfood-report-template.md
+    and follow it. Include an executive summary with total and per-severity counts
+    and scope, one section per issue (number and title, severity and category, URL,
+    description, steps to reproduce, expected vs actual, console errors, and a line
+    MEDIA:<screenshot_path>), a summary table, and testing notes listing what was
+    tested, what was not, and any blockers. If issues and counts are not available
+    because testing was not approved, state that no testing ran and list the planned
+    pages from pages.
+  tools:
+  - skill_view
   inputs:
-  - sorted_issues
-  - issue_counts
-  - evidence_refs
+  - issues
+  - counts
+  - page_results
+  - pages
   - scope
-  - target_url
-  tools:
-  - read_file
   output_schema:
     type: object
-    additionalProperties: false
-    required:
-    - report_markdown
     properties:
       report_markdown:
         type: string
+    required:
+    - report_markdown
+    additionalProperties: false
   outputs:
   - report_markdown
   checks:
   - schema
-  - mentions_every_issue
+  - non_empty
+  - report_complete
   on_fail:
     retry: 1
     then: stop
   next:
-  - to: review_gate
-- id: review_gate
-  type: branch
-  goal: Ask the human reviewer to approve the report draft before anything is written
-    to disk.
-  true: approval
-  inputs:
-  - report_markdown
-  - issue_counts
-  outputs:
-  - approval
-  next:
   - to: write_report
-    label: reviewer approves the draft
-  - to: draft_report
-    label: reviewer requests changes
 - id: write_report
-  type: code
-  goal: Save the approved report to report.md in the output directory.
-  script: checks/write_report.py
+  type: tool
+  goal: Save the report to output_dir/report.md.
+  tool: write_file
+  instructions: Write report_markdown to the path OUTPUT_DIR/report.md, where OUTPUT_DIR
+    is the output_dir input.
   inputs:
   - report_markdown
-  - output_paths
+  - output_dir
   outputs:
   - report_path
   checks:
-  - schema
-  - file_written_to_output_dir
-  next:
-  - to: final_answer
-- id: final_answer
-  type: code
-  goal: Assemble the final answer with the report path and issue counts.
-  script: checks/final_answer.py
-  inputs:
-  - report_path
-  - issue_counts
-  outputs:
-  - final_answer
-  checks:
-  - schema
-  - counts_present
+  - file_written
+  on_fail:
+    retry: 0
+    then: stop

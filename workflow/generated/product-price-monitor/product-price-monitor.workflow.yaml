@@ -1,328 +1,514 @@
 name: product-price-monitor
 version: 0.1
-goal: Set up a price watch on one exact item with a verified baseline, then on each
-  tick fetch the price, suppress duplicate alerts, and alert only when the all-in
-  condition is met.
+goal: Set up a price watch on one concrete item (baseline fetch, contract file, recurring
+  cron job), and on each scheduled tick re-fetch the item, compare the all-in price
+  and availability with stored state, alert only on a new qualifying condition, and
+  never overwrite the last good observation with an error.
 context_policy: fresh context per node; only the declared inputs are passed
+tools_provided:
+- cronjob_manage
 inputs:
-  item_url:
+  mode:
     type: string
     from: user
-    description: source URL of the exact product or listing
-  variant:
+    description: Either setup (first-time foreground setup) or tick (a scheduled run
+      for an existing watch).
+  item_description:
     type: string
     from: user
-    description: exact variant such as size, color, quantity, dates, room or cabin
-  currency:
+    description: Source URL or provider, product or listing ID, variant, quantity,
+      location, dates or guests, login assumptions, condition, seller, and acceptable
+      substitutes. Used in setup mode.
+  alert_condition:
     type: string
     from: user
-    description: ISO currency code for the alert, e.g. USD
-  max_all_in_price:
-    type: number
-    from: user
-    description: alert when the all-in total is at or below this amount
-  cooldown_hours:
-    type: number
-    from: user
-    description: minimum hours between repeat alerts for the same offer
-  destination:
+    description: Currency, all-in or pre-tax basis, maximum price, availability rule,
+      shipping and refundability terms, cabin/room/ticket class, cooldown, and notification
+      destination. Used in setup mode.
+  watch_slug:
     type: string
     from: user
-    description: where alerts are delivered
-  cadence:
+    description: Short slug for the watch; the state file is ~/.hermes/price-watches/<watch_slug>.json.
+  deliver:
     type: string
     from: user
-    description: schedule such as every 6h
+    description: Delivery destination for the cron job's alerts. Used in setup mode.
 nodes:
-- id: build_contract
-  type: code
-  goal: Build the watch contract that pins the exact item, variant, currency, threshold,
-    cooldown and destination.
-  script: checks/build_contract.py
+- id: route_mode
+  type: branch
+  goal: Send setup runs to define_item and scheduled tick runs to tick_fetch.
+  'true': mode
   inputs:
-  - item_url
-  - variant
-  - currency
-  - max_all_in_price
-  - cooldown_hours
-  - destination
+  - mode
   outputs:
-  - contract
+  - route
   checks:
-  - schema
-  - variant_nonempty
-  - currency_is_iso_code
-  - threshold_positive
+  - mode_is_setup_or_tick
   next:
-  - to: fetch_baseline
-- id: fetch_baseline
+  - to: define_item
+    label: mode is setup
+  - to: tick_fetch
+    label: mode is tick
+- id: define_item
   type: agent
-  goal: Fetch the source once and record a live baseline observation for the exact
-    item contract.
-  instructions: Call web_extract once on contract.source_url. Confirm the page shows
-    the pinned variant. Copy base price, mandatory fees, taxes and shipping, all-in
-    total, availability and terms exactly as shown, in source currency. Record the
-    retrieval time in ISO 8601. If the fetch fails or the page is an error or wrong
-    variant, set failed to true and leave numeric fields null. Never guess a number.
+  goal: Pin the exact item so two variants cannot be confused.
+  instructions: Read item_description and record the source URL or provider, product
+    or listing ID, variant, quantity, location, dates or guests, login assumptions,
+    condition, seller, and substitutes. Use only what the user gave. Mark unknown
+    fields as empty strings; do not guess. Use no tools.
   inputs:
-  - contract
-  tools:
-  - web_extract
+  - item_description
+  tools: []
   output_schema:
     type: object
     additionalProperties: false
     required:
-    - source_url
-    - retrieved_at
-    - source_currency
-    - base_price
-    - mandatory_fees
-    - taxes_and_shipping
-    - all_in_total
-    - availability
-    - terms
-    - failed
+    - item_contract
     properties:
-      source_url:
-        type: string
-      retrieved_at:
-        type: string
-        description: ISO 8601 timestamp
-      source_currency:
-        type: string
-      base_price:
-        type:
-        - number
-        - 'null'
-      mandatory_fees:
-        type:
-        - number
-        - 'null'
-      taxes_and_shipping:
-        type:
-        - number
-        - 'null'
-      all_in_total:
-        type:
-        - number
-        - 'null'
-      availability:
-        type: string
-      terms:
-        type: string
-      failed:
-        type: boolean
+      item_contract:
+        type: object
+        additionalProperties: false
+        required:
+        - source_url
+        - product_id
+        - variant
+        - quantity
+        - location
+        - dates_or_guests
+        - login_assumptions
+        - condition
+        - seller
+        - substitutes
+        properties:
+          source_url:
+            type: string
+          product_id:
+            type: string
+          variant:
+            type: string
+          quantity:
+            type: string
+          location:
+            type: string
+          dates_or_guests:
+            type: string
+          login_assumptions:
+            type: string
+          condition:
+            type: string
+          seller:
+            type: string
+          substitutes:
+            type: string
   outputs:
-  - baseline
+  - item_contract
   checks:
   - schema
-  - grounded_in_tool_results
-  - variant_matches_contract
+  - non_empty
+  - item_pins_variant
   on_fail:
     retry: 1
     then: stop
   next:
-  - to: approve_baseline
-- id: approve_baseline
-  type: branch
-  goal: Show the contract and baseline to the user and wait for approval before anything
-    is written or scheduled.
-  true: approval
+  - to: define_condition
+- id: define_condition
+  type: agent
+  goal: Write an alert rule with a deterministic decision for any observation.
+  instructions: From alert_condition and item_contract, record currency, all-in or
+    pre-tax basis, maximum price, availability rule, shipping and refundability, class,
+    cooldown in hours, and notification destination. Then give the alert decision
+    for at least three synthetic observations (below threshold, above threshold, out
+    of stock). Use no tools.
   inputs:
-  - contract
-  - baseline
+  - alert_condition
+  - item_contract
+  tools: []
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - alert_rule
+    properties:
+      alert_rule:
+        type: object
+        additionalProperties: false
+        required:
+        - currency
+        - price_basis
+        - max_price
+        - availability_rule
+        - terms_rule
+        - cooldown_hours
+        - destination
+        - synthetic_decisions
+        properties:
+          currency:
+            type: string
+          price_basis:
+            type: string
+            enum:
+            - all_in
+            - pre_tax
+          max_price:
+            type: number
+          availability_rule:
+            type: string
+          terms_rule:
+            type: string
+          cooldown_hours:
+            type: number
+          destination:
+            type: string
+          synthetic_decisions:
+            type: array
+            items:
+              type: object
+              additionalProperties: false
+              required:
+              - observation
+              - decision
+              properties:
+                observation:
+                  type: string
+                decision:
+                  type: string
   outputs:
-  - approval
-  next:
-  - to: write_state
-    label: user approves and baseline.failed is false
-  - to: report_outcome
-    label: user declines or baseline failed
-- id: write_state
-  type: tool
-  goal: Write the watch contract and baseline to the state file under the price-watches
-    directory.
-  tool: write_file
-  inputs:
-  - contract
-  - baseline
-  outputs:
-  - state_path
+  - alert_rule
   checks:
   - schema
-  - file_parses_as_json
-  - contract_matches_state
+  - non_empty
+  - condition_decides_synthetic_examples
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: baseline_fetch
+- id: baseline_fetch
+  type: agent
+  goal: Fetch the item once live and build the watch contract with that baseline,
+    and do not proceed unless the fetch succeeded.
+  instructions: Fetch the source with web_extract; if the page needs JavaScript or
+    login, use browser_exec. Record retrieval time, source currency, base price, mandatory
+    fees, shipping and taxes, all-in total, availability, and terms. Exclude volatile
+    page metadata. If the fetch fails, set status to failed and stop; do not invent
+    a baseline. On success, set watch_contract to item_contract, alert_rule, and this
+    baseline observation.
+  inputs:
+  - item_contract
+  - alert_rule
+  tools:
+  - web_extract
+  - browser_exec
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - watch_contract
+    properties:
+      watch_contract:
+        type: object
+        additionalProperties: false
+        required:
+        - item
+        - condition
+        - baseline
+        properties:
+          item:
+            type: object
+          condition:
+            type: object
+          baseline:
+            type: object
+            additionalProperties: false
+            required:
+            - status
+            - retrieved_at
+            - source_currency
+            - base_price
+            - mandatory_fees
+            - shipping_taxes
+            - all_in_total
+            - availability
+            - terms
+            - source_url
+            properties:
+              status:
+                type: string
+                enum:
+                - ok
+                - failed
+              retrieved_at:
+                type: string
+              source_currency:
+                type: string
+              base_price:
+                type:
+                - number
+                - 'null'
+              mandatory_fees:
+                type:
+                - number
+                - 'null'
+              shipping_taxes:
+                type:
+                - number
+                - 'null'
+              all_in_total:
+                type:
+                - number
+                - 'null'
+              availability:
+                type: string
+              terms:
+                type: string
+              source_url:
+                type: string
+  outputs:
+  - watch_contract
+  checks:
+  - schema
+  - non_empty
+  - baseline_fetch_succeeded
+  - baseline_matches_contract
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: write_contract
+- id: write_contract
+  type: tool
+  goal: Write the watch contract, with last_good_observation set to the baseline and
+    no alert fingerprint, to the state file.
+  tool: write_file
+  instructions: Write watch_contract as JSON to ~/.hermes/price-watches/<watch_slug>.json,
+    adding last_good_observation equal to the baseline and last_alert_fingerprint
+    set to null.
+  inputs:
+  - watch_contract
+  - watch_slug
+  outputs:
+  - contract_path
+  checks:
+  - schema
   on_fail:
     retry: 0
     then: stop
   next:
-  - to: create_schedule
-- id: create_schedule
+  - to: create_job
+- id: create_job
   type: tool
-  goal: Create the recurring tick job that runs this watch at the requested cadence.
+  goal: Create the recurring tick job only after the baseline and contract file exist.
   tool: cronjob_manage
+  instructions: Call cronjob with action create, schedule every 6h, prompt "Load the
+    product-price-monitor skill and run the tick for the watch contract at ~/.hermes/price-watches/<watch_slug>.json.",
+    and deliver set to the deliver input.
   inputs:
-  - state_path
-  - cadence
-  - destination
+  - contract_path
+  - watch_slug
+  - deliver
   outputs:
   - job_id
   checks:
   - schema
-  - job_listed_with_cadence
+  - cadence_respects_site_limits
   on_fail:
     retry: 0
     then: stop
   next:
-  - to: fetch_current
-- id: fetch_current
+  - to: report
+- id: tick_fetch
   type: agent
-  goal: Re-fetch the source for the tick and record one observation comparable to
-    the baseline.
-  instructions: Call web_extract once on contract.source_url for the pinned variant.
-    Copy base price, fees, taxes and shipping, all-in total, availability and terms
-    exactly, in source currency, with a retrieval timestamp. If the fetch fails or
-    the page is an error page, set failed to true and leave numeric fields null. Never
-    guess a number.
+  goal: Re-fetch the watched item and normalize it to the same fields as the baseline.
+  instructions: Read ~/.hermes/price-watches/<watch_slug>.json with read_file to get
+    the item and condition. Re-fetch the source with web_extract, or browser_exec
+    if needed. Normalize to the baseline fields with a timestamp and source currency.
+    Exclude volatile page metadata. If the fetch fails, set status to failed and leave
+    all other values null. Do not write any file.
   inputs:
-  - contract
-  - state_path
+  - watch_slug
   tools:
+  - read_file
   - web_extract
+  - browser_exec
   output_schema:
     type: object
     additionalProperties: false
     required:
-    - source_url
-    - retrieved_at
-    - source_currency
-    - base_price
-    - mandatory_fees
-    - taxes_and_shipping
-    - all_in_total
-    - availability
-    - terms
-    - failed
+    - tick_observation
     properties:
-      source_url:
-        type: string
-      retrieved_at:
-        type: string
-        description: ISO 8601 timestamp
-      source_currency:
-        type: string
-      base_price:
-        type:
-        - number
-        - 'null'
-      mandatory_fees:
-        type:
-        - number
-        - 'null'
-      taxes_and_shipping:
-        type:
-        - number
-        - 'null'
-      all_in_total:
-        type:
-        - number
-        - 'null'
-      availability:
-        type: string
-      terms:
-        type: string
-      failed:
-        type: boolean
+      tick_observation:
+        type: object
+        additionalProperties: false
+        required:
+        - status
+        - retrieved_at
+        - source_currency
+        - base_price
+        - mandatory_fees
+        - shipping_taxes
+        - all_in_total
+        - availability
+        - terms
+        - source_url
+        properties:
+          status:
+            type: string
+            enum:
+            - ok
+            - failed
+          retrieved_at:
+            type: string
+          source_currency:
+            type: string
+          base_price:
+            type:
+            - number
+            - 'null'
+          mandatory_fees:
+            type:
+            - number
+            - 'null'
+          shipping_taxes:
+            type:
+            - number
+            - 'null'
+          all_in_total:
+            type:
+            - number
+            - 'null'
+          availability:
+            type: string
+          terms:
+            type: string
+          source_url:
+            type: string
   outputs:
-  - observation
+  - tick_observation
   checks:
   - schema
   - grounded_in_tool_results
-  - variant_matches_contract
   on_fail:
     retry: 1
     then: stop
   next:
-  - to: compare_observation
-- id: compare_observation
+  - to: compare_and_decide
+- id: compare_and_decide
   type: code
-  goal: Compare the observation with the stored state and decide alert, silent or
-    failed, deterministically.
-  script: checks/compare_observation.py
+  goal: Compare the tick observation with the stored rule and state, and decide whether
+    to alert, using fingerprints and cooldown.
+  script: checks/compare_and_decide.py
   inputs:
-  - observation
-  - contract
-  - state_path
+  - tick_observation
+  - watch_slug
   outputs:
-  - decision
-  - alert_payload
-  - updated_state
+  - alert_decision
+  - state_update
   checks:
   - schema
-  - deterministic_replay
-  - no_overwrite_on_failed_fetch
-  - same_offer_not_realerted_within_cooldown
-  - currency_matches_contract
+  - compare_is_deterministic
+  - state_file_preserves_last_good
+  on_fail:
+    retry: 0
+    then: stop
   next:
-  - to: route_alert
-- id: route_alert
+  - to: gate_alert
+- id: gate_alert
   type: branch
-  goal: Route to delivery only when the decision is alert; otherwise save state silently.
-  true: decision
+  goal: Send only alert decisions to delivery; every other decision, including silence
+    and failed fetches, goes straight to the state write.
+  'true': alert_decision
   inputs:
-  - decision
+  - alert_decision
   outputs:
-  - route_result
+  - route
+  checks:
+  - schema
   next:
   - to: deliver_alert
-    label: decision is alert
-  - to: save_state
-    label: decision is silent or failed
+    label: alert condition met
+  - to: record_state
+    label: any other decision
 - id: deliver_alert
-  type: tool
-  goal: Send the alert with all-in price, currency, availability, threshold, timestamp,
-    source link and uncertainty.
-  tool: send_message
+  type: agent
+  goal: Write the alert with all required fields, and do not claim stock is reserved.
+  instructions: Using alert_decision and tick_observation, write one alert that names
+    the exact item and variant, the all-in price with source currency, availability
+    and terms, the threshold, the retrieval timestamp, the source link, and any uncertainty.
+    Do not say stock is reserved. Use no tools.
   inputs:
-  - alert_payload
-  - destination
+  - alert_decision
+  - tick_observation
+  tools: []
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - alert_message
+    properties:
+      alert_message:
+        type: string
   outputs:
-  - delivery
+  - alert_message
   checks:
   - schema
-  - destination_matches_contract
-  - payload_has_all_in_price_currency_timestamp_link
-  - never_claims_reserved_inventory
+  - non_empty
+  - alert_has_required_fields
   on_fail:
-    retry: 0
+    retry: 1
     then: stop
   next:
-  - to: save_state
-- id: save_state
+  - to: record_state
+- id: record_state
   type: tool
-  goal: Save the last good observation and last alert fingerprint to the state file.
+  goal: Save the new state, keeping the last good observation when the fetch failed
+    and the new alert fingerprint when an alert was sent.
   tool: write_file
+  instructions: Write state_update as JSON to ~/.hermes/price-watches/<watch_slug>.json.
   inputs:
-  - updated_state
-  - state_path
+  - state_update
+  - watch_slug
   outputs:
-  - saved_state
+  - state_written
   checks:
   - schema
-  - last_good_not_overwritten_by_error
-  - file_parses_as_json
   on_fail:
     retry: 0
     then: stop
   next:
-  - to: report_outcome
-- id: report_outcome
+  - to: report
+- id: report
   type: code
-  goal: Produce the short final result for the run.
-  script: checks/report_outcome.py
+  goal: 'Produce the final answer: the job id on setup, or the alert message or a
+    silent-run note on tick.'
+  script: checks/report.py
   inputs:
-  - approval
+  - job_id
+  - alert_message
+  - state_written
   outputs:
-  - result
+  - final_answer
   checks:
   - schema
+  - non_empty
+check_descriptions:
+  mode_is_setup_or_tick: The mode value is exactly setup or tick.
+  item_pins_variant: The item contract names one exact product or listing ID, variant,
+    quantity, location and dates, so no other variant could match it.
+  condition_decides_synthetic_examples: The alert rule states currency, all-in or
+    pre-tax basis, maximum price, availability rule, cooldown and destination, and
+    gives a decision for at least three synthetic observations.
+  baseline_fetch_succeeded: The baseline observation has status ok, with a retrieval
+    timestamp, source price, fees and taxes, availability, and terms filled in from
+    a live fetch.
+  baseline_matches_contract: The watch contract's item, condition and baseline are
+    identical to the item contract, alert rule and fetch result, with no fields altered.
+  cadence_respects_site_limits: The schedule is no more often than every 6 hours and
+    the job prompt names the watch contract path.
+  compare_is_deterministic: 'The alert decision and state update follow only from
+    the tick observation and stored state: an identical offer fingerprint yields no
+    alert, and the cooldown is respected.'
+  state_file_preserves_last_good: When the tick observation has status failed, the
+    state update keeps the previous last_good_observation unchanged.
+  alert_has_required_fields: The alert message includes the item variant, all-in price
+    with source currency, availability and terms, threshold, retrieval timestamp,
+    source link and an uncertainty note, and does not claim stock is reserved.

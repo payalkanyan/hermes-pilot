@@ -8,6 +8,24 @@ except ImportError:
     sys.exit("PyYAML is missing. Run: pip install pyyaml")
 
 TYPES = {"tool", "agent", "code", "branch"}
+# Checks the runner knows how to execute itself. Anything else is a custom check and needs a
+# one-line rule in the spec's check_descriptions, so a judge node can actually run it.
+BUILTIN_CHECKS = {"schema", "non_empty", "grounded_in_tool_results", "readback_matches_total",
+                  "one_verdict_per_invoice", "reasons_are_bare_codes"}
+
+def hermes_tools(repo=None):
+    """Official Hermes tool names, read from the repo's toolsets.py. Returns None if it cannot be read
+    (then tool names are not checked, rather than being wrongly rejected)."""
+    import os, pathlib as _p, re as _re
+    cands = [repo] if repo else []
+    cands += [os.environ.get("HERMES_REPO"), _p.Path.home() / "projects/hermes-agent", _p.Path.home() / ".hermes/hermes-agent"]
+    for c in cands:
+        if not c: continue
+        f = _p.Path(c) / "toolsets.py"
+        if f.exists():
+            names = set(_re.findall(r'"([a-z][a-z0-9_]{2,40})"', f.read_text(encoding="utf-8", errors="replace")))
+            return names or None
+    return None
 
 def load(path):
     return yaml.safe_load(open(path, encoding="utf-8"))
@@ -30,8 +48,10 @@ def ancestors(nodes):
         return out
     return {i: anc(i) for i in parents}
 
-def validate(spec):
+def validate(spec, tool_names=None):
     errs, warns = [], []
+    tool_names = tool_names if tool_names is not None else hermes_tools()
+    described = set((spec.get("check_descriptions") or {}))
     nodes = spec["nodes"]; ids = [n["id"] for n in nodes]
     if len(set(ids)) != len(ids): errs.append("duplicate node ids")
     for n in nodes:
@@ -64,9 +84,23 @@ def validate(spec):
             if "output_schema" not in n: errs.append(f"{n['id']}: an agent node needs an output_schema")
             if not n.get("tools"): warns.append(f"{n['id']}: agent node with no tool allowlist")
             if not n.get("checks"): errs.append(f"{n['id']}: an agent node needs checks")
+        for t in n.get("tools", []) + ([n["tool"]] if n.get("tool") else []):
+            if tool_names and t not in tool_names and t not in set(spec.get("tools_provided") or []):
+                warns.append(f"UNKNOWN TOOL {n['id']}: '{t}' is not in Hermes' toolsets.py and is not declared under tools_provided (an MCP tool, or invented?)")
+        for c in n.get("checks", []):
+            cname = c.split(":")[0].strip() if isinstance(c, str) else str(c)
+            if cname not in BUILTIN_CHECKS and cname not in described:
+                errs.append(f"{n['id']}: check '{cname}' is not built in, so add a one-line rule for it under check_descriptions")
         for x in ins:
             if x in ("*", "all", "history", "context"): errs.append(f"{n['id']}: input '{x}' passes everything; declare specific inputs")
             elif x not in avail: errs.append(f"{n['id']}: input '{x}' is not available at this point (not a workflow input or an earlier node's output)")
+        risky = {"terminal", "patch", "write_file", "browser_exec", "skill_manage"}
+        used = set(n.get("tools", [])) | ({n["tool"]} if n.get("tool") else set())
+        if used & risky:
+            direct = [p["id"] for p in nodes for e in p.get("next", []) if e["to"] == n["id"]]
+            gated = bool(n.get("checks")) or any(by_id[p]["type"] == "branch" for p in direct)
+            if not gated:
+                errs.append(f"{n['id']}: uses {sorted(used & risky)} but nothing checks or approves before it runs")
         if n["type"] == "branch" and len(n.get("next", [])) < 2: errs.append(f"{n['id']}: a branch needs at least two routes")
         if not n.get("next") and n["id"] != ids[-1]: warns.append(f"{n['id']}: no next node (is this an end?)")
     return errs, warns

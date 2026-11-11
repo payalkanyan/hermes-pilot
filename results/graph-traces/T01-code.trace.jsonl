@@ -4,5 +4,5 @@
 {"node": "route", "type": "branch", "status": "ok", "input_keys": ["facts", "verdicts"], "n_items": null, "input_chars": 2090, "output_chars": 311, "seconds": 0.0, "model_calls": 0}
 {"node": "create_draft", "type": "tool", "status": "ok", "input_keys": ["item"], "n_items": 4, "input_chars": 276, "output_chars": 378, "seconds": 0.0, "model_calls": 0}
 {"node": "read_back", "type": "tool", "status": "ok", "input_keys": ["item"], "n_items": 4, "input_chars": 368, "output_chars": 322, "seconds": 0.0, "model_calls": 0}
-{"node": "record_exceptions", "type": "code", "status": "ok", "input_keys": ["exception_items"], "n_items": null, "input_chars": 23, "output_chars": 18, "seconds": 0.03, "model_calls": 0}
+{"node": "record_exceptions", "type": "code", "status": "ok", "input_keys": ["exception_items"], "n_items": null, "input_chars": 23, "output_chars": 18, "seconds": 0.02, "model_calls": 0}
 {"node": "report", "type": "code", "status": "ok", "input_keys": ["confirmed_drafts", "exceptions"], "n_items": null, "input_chars": 340, "output_chars": 349, "seconds": 0.02, "model_calls": 0}

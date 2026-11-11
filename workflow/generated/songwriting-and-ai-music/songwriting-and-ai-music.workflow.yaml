@@ -1,93 +1,113 @@
 name: songwriting-and-ai-music
 version: 0.1
-goal: Turn a concept (original song or parody of a supplied song) into lyrics with
-  structure tags and a Suno style prompt, get human approval, then save the package.
+goal: 'Turn a song concept (original or parody) into a finished, Suno-ready package:
+  hook, structure, lyrics, meter and phonetic checks, metatags, style prompt, variation
+  plan, and the chosen take.'
 context_policy: fresh context per node; only the declared inputs are passed
 inputs:
   concept:
     type: string
     from: user
-    description: Emotional core, theme, or hook idea for the song
-  mode:
+    description: The song idea, theme, or emotional core in a few sentences.
+  original_song_text:
     type: string
     from: user
-    description: Either 'original' or 'parody'
-  mood:
+    description: Optional. Lyrics of an existing song to parody or adapt. Leave empty
+      for an original song.
+  target_style:
     type: string
     from: user
-    description: Mood or emotional arc, e.g. whisper to roar to whisper
-  genre:
-    type: string
-    from: user
-    description: Genre and era, described by sound, never by artist name
-  source_lyrics:
-    type: string
-    from: user
-    description: Lyrics of the song to parody or adapt. Required when mode is 'parody',
-      empty otherwise
+    description: Optional. Genre, era, instruments, vocal persona, BPM or key preferences
+      for the Suno style field.
 nodes:
-- id: check_mode
-  type: branch
-  goal: Route the run to skeleton mapping for parody or straight to drafting for an
-    original song.
-  true: mode
-  inputs:
-  - mode
-  - source_lyrics
-  outputs:
-  - route_taken
-  checks:
-  - schema
-  - parody_has_source_lyrics
-  next:
-  - to: map_skeleton
-    label: mode is parody
-  - to: draft_lyrics
-    label: mode is original
-- id: map_skeleton
+- id: write_hook
   type: agent
-  goal: Map the source song's structure line by line (syllables, rhyme scheme, stressed
-    syllables, held notes).
-  instructions: Read only the source lyrics. For each line, count syllables, label
-    the rhyme scheme letter (A, B, C...), and mark stressed syllables in capitals.
-    Note sections and where long held notes fall. Do not invent lines. Do not add
-    commentary.
+  goal: Write the concept and the hook, the emotional core and the line people remember.
+  instructions: 'Name the emotional core in one or two sentences. Write the hook:
+    usually the title or core phrase, placed where it lands hardest (often the first
+    or last line of the chorus). Keep it short and singable. Start from the title
+    and hook and build outward.'
   inputs:
-  - source_lyrics
+  - concept
+  outputs:
+  - hook_concept
   tools: []
   output_schema:
     type: object
-    additionalProperties: false
-    required:
-    - skeleton
     properties:
-      skeleton:
-        type: array
-        items:
-          type: object
-          additionalProperties: false
-          required:
-          - section
-          - line
-          - syllables
-          - rhyme_letter
-          - stressed
-          properties:
-            section:
-              type: string
-            line:
-              type: string
-            syllables:
-              type: integer
-            rhyme_letter:
-              type: string
-            stressed:
-              type: string
-  outputs:
-  - skeleton
+      hook_concept:
+        type: string
+    required:
+    - hook_concept
+    additionalProperties: false
   checks:
   - schema
-  - line_count_matches_source
+  - non_empty
+  - hook_identified
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: map_skeleton
+- id: map_skeleton
+  type: agent
+  goal: 'If an original song is given, map its structure: syllables, rhyme scheme,
+    stressed syllables, and held notes. If not, mark the skeleton as not applicable.'
+  instructions: If original_song_text is empty, set skeleton to the text not applicable
+    and stop. Otherwise, for each line count syllables, mark the rhyme scheme (ABAB,
+    AABB and so on), mark the stressed syllables, and note where held or sustained
+    notes fall. Also pick a common skeleton (ABABCB, AABA, ABAB or AAA) or invent
+    one that serves the emotion.
+  inputs:
+  - original_song_text
+  - hook_concept
+  outputs:
+  - skeleton
+  tools: []
+  output_schema:
+    type: object
+    properties:
+      skeleton:
+        type: string
+    required:
+    - skeleton
+    additionalProperties: false
+  checks:
+  - schema
+  - non_empty
+  - skeleton_mapped
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: generate_material
+- id: generate_material
+  type: agent
+  goal: Brainstorm raw material (images, phrases, puns, rhymes) freely before fitting
+    anything into the structure.
+  instructions: 'Generate many raw candidates: images, phrases, puns, near rhymes
+    and perfect rhymes, and for parody the replacement words that match the stressed
+    syllables. Do not order them into verses yet. Use the hook and skeleton as the
+    frame.'
+  inputs:
+  - hook_concept
+  - skeleton
+  outputs:
+  - raw_material
+  tools: []
+  output_schema:
+    type: object
+    properties:
+      raw_material:
+        type: array
+        items:
+          type: string
+    required:
+    - raw_material
+    additionalProperties: false
+  checks:
+  - schema
+  - non_empty
   on_fail:
     retry: 1
     then: stop
@@ -95,146 +115,346 @@ nodes:
   - to: draft_lyrics
 - id: draft_lyrics
   type: agent
-  goal: Draft the full lyrics with bracketed structure and performance metatags, following
-    the skeleton when one is given.
-  instructions: Build the song from the concept, mood, and genre. If a skeleton is
-    given, match each section's syllable count within 1-2 unstressed syllables and
-    keep the rhyme scheme. Keep some original lines intact when parodying. Use 5-8
-    metatags per section at most, no contradictory tags in one section. Spell out
-    numbers and space out acronyms. If review_notes is not empty, apply those notes.
+  goal: Draft the lyrics into the chosen structure, with contrast, prosody, and for
+    parody, original lines kept and the bridge transformed.
+  instructions: Fit the best raw material into the structure. Build an energy arc
+    (intro low, verse mid, chorus high, bridge a detour, final chorus highest). Use
+    show-don't-tell imagery. Match prosody to feeling. If this is a parody, keep a
+    few original lines or structures intact and in the bridge swap the original's
+    specific references for the new theme's metaphors while keeping the emotional
+    function. Monosyllabic swaps go in hooks and key spots. Treat the draft as revisable.
   inputs:
-  - concept
-  - mood
-  - genre
+  - hook_concept
   - skeleton
-  - review_notes
+  - raw_material
+  - original_song_text
+  outputs:
+  - lyrics
   tools: []
   output_schema:
     type: object
-    additionalProperties: false
-    required:
-    - title
-    - lyrics
     properties:
-      title:
-        type: string
       lyrics:
         type: string
-  outputs:
-  - title
-  - lyrics
+    required:
+    - lyrics
+    additionalProperties: false
   checks:
   - schema
-  - lyrics_under_3000_chars
-  - metatags_in_allowed_list
-  - no_artist_names
+  - non_empty
+  - structure_matches_skeleton
+  - original_lines_kept
+  - bridge_transforms_imagery
   on_fail:
     retry: 1
     then: stop
   next:
-  - to: build_suno_prompt
-- id: build_suno_prompt
+  - to: meter_pass
+- id: meter_pass
   type: agent
-  goal: Build the Suno Style field and Exclude Styles field that describe the dynamic
-    journey, and place matching tags in the lyrics.
-  instructions: 'Style field formula: genre, mood, era, instruments, vocal persona,
-    production, dynamics, with the journey described in order. Use BPM and key if
-    the mood calls for it. Do not use artist names or trademarks. Exclude field lists
-    what the song must not sound like. Add the same structure tags to the lyrics where
-    they are missing.'
+  goal: Read each line aloud in your head, check the stressed syllables against the
+    beat, and fix lines that stumble.
+  instructions: For every line, check that stressed syllables land on the beats. Allow
+    a 1-2 unstressed syllable flex in parody. Revise any line that stumbles. Breaking
+    meter on purpose is allowed if it adds emphasis; keep such lines but make sure
+    they are deliberate. Return the revised lyrics.
   inputs:
-  - title
   - lyrics
-  - mood
-  - genre
+  outputs:
+  - lyrics_metered
   tools: []
   output_schema:
     type: object
-    additionalProperties: false
+    properties:
+      lyrics_metered:
+        type: string
     required:
-    - style_field
-    - exclude_field
-    - lyrics_with_tags
+    - lyrics_metered
+    additionalProperties: false
+  checks:
+  - schema
+  - non_empty
+  - meter_checked
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: phonetic_pass
+- id: phonetic_pass
+  type: agent
+  goal: Respell words so the AI singer pronounces them right, add delivery control,
+    and flag proper nouns and unusual words for a 30-second clip test.
+  instructions: Spell words as they sound (through to thru). Spell out numbers (24/7
+    to twenty four seven). Space acronyms (AI to A I). Hyphenate to guide syllables.
+    Use ALL CAPS for intensity, vowel extension for melisma, ellipses for pauses,
+    and hyphenated stretch for emotional stretch. List every respelling you made as
+    original-to-respelled pairs. Flag every proper noun and unusual word for a short
+    clip test before the full generation, because pronunciation is baked in once generated.
+  inputs:
+  - lyrics_metered
+  outputs:
+  - lyrics_phonetic
+  - phonetic_respellings
+  - clip_test_flags
+  tools: []
+  output_schema:
+    type: object
+    properties:
+      lyrics_phonetic:
+        type: string
+      phonetic_respellings:
+        type: array
+        items:
+          type: string
+      clip_test_flags:
+        type: array
+        items:
+          type: string
+    required:
+    - lyrics_phonetic
+    - phonetic_respellings
+    - clip_test_flags
+    additionalProperties: false
+  checks:
+  - schema
+  - non_empty
+  - phonetic_rules_applied
+  - respellings_listed
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: metatag_pass
+- id: metatag_pass
+  type: agent
+  goal: Add structural, performance, and dynamics metatags in brackets inside the
+    lyrics.
+  instructions: Put a bracketed structure tag before each section (Intro, Verse, Pre-Chorus,
+    Chorus, Bridge, Outro and so on). Add a few performance or dynamics tags (for
+    example Belted, Whispered, Building Energy). Keep 5-8 tags per section at most.
+    Do not put contradictory tags in one section (for example Calm with Aggressive).
+    Keep the lyrics under about 3,000 characters.
+  inputs:
+  - lyrics_phonetic
+  outputs:
+  - tagged_lyrics
+  tools: []
+  output_schema:
+    type: object
+    properties:
+      tagged_lyrics:
+        type: string
+    required:
+    - tagged_lyrics
+    additionalProperties: false
+  checks:
+  - schema
+  - non_empty
+  - structural_tags_present
+  - tags_per_section_max
+  - no_contradictory_tags
+  - lyrics_under_3000_chars
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: style_prompt
+- id: style_prompt
+  type: agent
+  goal: Write the Suno Style field and the Exclude Styles field, describing the dynamic
+    journey and a vocal persona.
+  instructions: Use the formula Genre + Mood + Era + Instruments + Vocal Style + Production
+    + Dynamics. Describe the journey (for example whisper to roar to whisper), not
+    just the genre. Build a vocal persona, not just a gender. Specify BPM or key if
+    target_style gives a preference. Never use artist names or trademarks; describe
+    the sound instead. Keep the style field under 1,000 characters. Put unwanted sounds
+    in exclude_style.
+  inputs:
+  - hook_concept
+  - target_style
+  - tagged_lyrics
+  outputs:
+  - style_field
+  - exclude_field
+  tools: []
+  output_schema:
+    type: object
     properties:
       style_field:
         type: string
       exclude_field:
         type: string
-      lyrics_with_tags:
-        type: string
-  outputs:
-  - style_field
-  - exclude_field
-  - lyrics_with_tags
+    required:
+    - style_field
+    - exclude_field
+    additionalProperties: false
   checks:
   - schema
-  - style_under_1000_chars
-  - lyrics_under_3000_chars
+  - non_empty
   - no_artist_names
+  - style_under_1000_chars
+  - describes_dynamic_arc
   on_fail:
     retry: 1
     then: stop
   next:
-  - to: package_prompt
-- id: package_prompt
-  type: code
-  goal: Assemble the title, lyrics, style, and exclude fields into one review package
-    as plain text. Writes nothing.
-  script: checks/package_prompt.py
+  - to: variation_plan
+- id: variation_plan
+  type: agent
+  goal: Plan 3 to 5 generation variations to run as takes, since expect about 3-5
+    generations per good result.
+  instructions: Produce 3 to 5 variations of the style field and lyrics, each changing
+    one meaningful thing (tempo, vocal persona, arrangement). Treat each as a recording
+    take. Note that style may drift in extensions, so restate genre and mood in each
+    extend request.
   inputs:
-  - title
-  - lyrics_with_tags
   - style_field
-  - exclude_field
+  - tagged_lyrics
   outputs:
-  - review_package
+  - variation_plan
+  tools: []
+  output_schema:
+    type: object
+    properties:
+      variation_plan:
+        type: array
+        items:
+          type: string
+    required:
+    - variation_plan
+    additionalProperties: false
   checks:
   - schema
-  - all_fields_present
-  next:
-  - to: request_approval
-- id: request_approval
-  type: tool
-  goal: Show the review package to the user and ask whether to save it, redraft it,
-    or drop it.
-  tool: ask_user
-  inputs:
-  - review_package
-  outputs:
-  - review_decision
-  - review_notes
-  checks:
-  - schema
-  - decision_is_approve_or_redraft_or_drop
+  - variation_count_3_to_5
   on_fail:
-    retry: 0
+    retry: 1
     then: stop
   next:
-  - to: route_approval
-- id: route_approval
-  type: branch
-  goal: Send approved packages to save, redraft rejected ones, and stop on drop.
-  true: review_decision
+  - to: select_take
+- id: select_take
+  type: agent
+  goal: Ask the user which generated take is best and which promising sections to
+    extend, and keep any accidental gems.
+  instructions: Ask the user which take is the best and which sections to extend using
+    the clarify tool. Keep any accidental happy result that is strong, even if it
+    was not planned. When extending, restate genre and mood. Return the chosen take
+    and the sections to extend.
   inputs:
-  - review_decision
+  - variation_plan
   outputs:
-  - approval_route
+  - selected_take
+  tools:
+  - clarify
+  output_schema:
+    type: object
+    properties:
+      selected_take:
+        type: string
+    required:
+    - selected_take
+    additionalProperties: false
   checks:
   - schema
+  - non_empty
+  - accidental_gems_kept
+  on_fail:
+    retry: 1
+    then: stop
   next:
-  - to: save_package
-    label: decision is approve
-  - to: draft_lyrics
-    label: decision is redraft
-- id: save_package
-  type: code
-  goal: Write the approved review package to the workspace as a text file. Runs only
-    after approval.
-  script: checks/save_package.py
+  - to: final_package
+- id: final_package
+  type: agent
+  goal: 'Assemble the final Suno package: style, exclude, tagged lyrics, phonetic
+    respellings, clip-test flags, and the chosen take.'
+  instructions: Assemble a single package with every section present, the style field,
+    the exclude field, the tagged lyrics, the phonetic respellings list, the clip-test
+    flags for proper nouns and unusual words, and the selected take. Do not change
+    content; only assemble.
   inputs:
-  - review_package
+  - hook_concept
+  - tagged_lyrics
+  - style_field
+  - exclude_field
+  - phonetic_respellings
+  - clip_test_flags
+  - selected_take
   outputs:
-  - saved_path
+  - final_package
+  tools: []
+  output_schema:
+    type: object
+    properties:
+      final_package:
+        type: object
+        properties:
+          hook:
+            type: string
+          style_field:
+            type: string
+          exclude_field:
+            type: string
+          tagged_lyrics:
+            type: string
+          phonetic_respellings:
+            type: array
+            items:
+              type: string
+          clip_test_flags:
+            type: array
+            items:
+              type: string
+          selected_take:
+            type: string
+        required:
+        - hook
+        - style_field
+        - exclude_field
+        - tagged_lyrics
+        - phonetic_respellings
+        - clip_test_flags
+        - selected_take
+        additionalProperties: false
+    required:
+    - final_package
+    additionalProperties: false
   checks:
   - schema
-  - file_exists_after_write
+  - non_empty
+  - all_sections_present
+  - respellings_listed
+  on_fail:
+    retry: 1
+    then: stop
+check_descriptions:
+  hook_identified: The output names a single hook line or core phrase and says where
+    it is placed in the chorus.
+  skeleton_mapped: If original_song_text is non-empty, the skeleton lists syllable
+    counts, rhyme scheme and stressed syllables per line; if it is empty, the skeleton
+    says not applicable.
+  structure_matches_skeleton: The lyrics use the section order of the chosen skeleton,
+    or a named invented structure.
+  original_lines_kept: For a parody, at least one original line or structure from
+    the source is kept intact; for an original song, this check passes.
+  bridge_transforms_imagery: The bridge swaps the original's specific references for
+    the new theme's metaphors while keeping its emotional function; passes for original
+    songs without a bridge from a source.
+  meter_checked: Every line has been checked for stressed syllables against the beat,
+    and any stumbling line is revised or marked as deliberate.
+  phonetic_rules_applied: Numbers are spelled out, acronyms are spaced, and words
+    are respelled as they sound.
+  respellings_listed: Each respelling is listed as an original-to-respelled pair,
+    and clip_test_flags lists every proper noun or unusual word.
+  structural_tags_present: Every section starts with a bracketed structure tag from
+    the allowed list.
+  tags_per_section_max: No section has more than 8 metatags.
+  no_contradictory_tags: No section mixes opposed tags such as Calm with Aggressive.
+  lyrics_under_3000_chars: The tagged lyrics are under about 3,000 characters.
+  no_artist_names: The style field contains no artist names, band names or trademarks.
+  style_under_1000_chars: The style field is under 1,000 characters.
+  describes_dynamic_arc: The style field describes how the song moves over time, not
+    just its genre.
+  variation_count_3_to_5: The variation plan lists between 3 and 5 variations.
+  accidental_gems_kept: Any strong unplanned result the user reported is kept in the
+    selected take rather than discarded.
+  all_sections_present: 'The final package contains all seven keys: hook, style_field,
+    exclude_field, tagged_lyrics, phonetic_respellings, clip_test_flags and selected_take.'

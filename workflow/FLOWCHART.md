@@ -31,10 +31,10 @@ flowchart TD
   classDef code fill:#e7f1ff,stroke:#2b6cb0;
   classDef tool fill:#e6ffed,stroke:#2f855a;
   classDef branch fill:#fde8e8,stroke:#c53030;
-  class list_invoices,create_draft,read_back tool;
   class collect_facts agent;
-  class route branch;
   class decide,record_exceptions,report code;
+  class route branch;
+  class list_invoices,create_draft,read_back tool;
 ```
 
 ## What each node receives

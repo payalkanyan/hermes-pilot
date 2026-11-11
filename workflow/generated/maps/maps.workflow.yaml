@@ -1,37 +1,56 @@
 name: maps
 version: 0.1
-goal: Answer one location question (geocode, reverse geocode, nearby places, distance,
-  directions, timezone, area or bounding-box search) with scripts/maps_client.py using
-  free OpenStreetMap data.
+goal: Answer a location request (geocode, reverse geocode, nearby places, distance,
+  directions, timezone, or bounding-box POI search) by running the maps_client.py
+  script and presenting the results with map links.
 context_policy: fresh context per node; only the declared inputs are passed
 inputs:
   request:
     type: string
     from: user
-    description: location question in plain words, or a Telegram pin with latitude
-      and longitude
+    description: 'The user''s location request in plain text. May include a Telegram
+      location pin as latitude: and longitude: fields.'
+check_descriptions:
+  command_in_catalog: The command field is exactly one of search, reverse, nearby,
+    distance, directions, timezone, area, bbox.
+  args_match_command: The args array has the required positional values for the chosen
+    command (for example two coordinates for reverse, a --to destination for distance
+    and directions, or lat/lon or --near for nearby) and no unknown flags.
+  json_output_parses: The terminal output is valid JSON from maps_client.py and contains
+    no traceback or error key.
+  exit_code_zero: The terminal command finished with exit code 0.
+  coordinates_in_range: Any latitude in the result is between -90 and 90 and any longitude
+    is between -180 and 180, and the result is not empty when the query named a real
+    place.
+  numbered_list_with_maps_url: The answer is a numbered list where each item gives
+    the name, distance or key detail, and the maps_url link from the result, and uses
+    only values present in the tool output.
+  hours_verified_or_marked_unknown: hours_note states either the opening hours found
+    by web_search with a source, or that the hours are unknown or unverified.
 nodes:
 - id: parse_request
   type: agent
-  goal: Turn the user's request into exactly one maps operation and its arguments.
-  instructions: 'Choose one operation: search (place name to coordinates), reverse
-    (coordinates to address), nearby (places by category around a point or address),
-    distance (travel distance and time), directions (turn-by-turn), timezone (for
-    coordinates), area (bounding box for a named place), bbox (places inside a box).
-    Copy place names, coordinates, categories and modes exactly as the user wrote
-    them. Default mode is driving. Never guess coordinates. If a required value is
-    missing, set operation to needs_clarification and state what is missing in question.'
+  goal: Turn the user's request into one maps_client.py command and its argument tokens.
+  instructions: 'Pick exactly one command from the catalog: search (place name to
+    coordinates), reverse (coordinates to address), nearby (places by category), distance,
+    directions, timezone, area (bounding box for a named place), bbox (POIs inside
+    a box). If the message contains latitude: and longitude: fields from a Telegram
+    pin, use nearby with those coordinates as the first two args and the category
+    mapped from the question, default radius 1500 for cafe-style questions. For nearby
+    by name, use --near with the place and --category per category (repeat --category
+    for multiple). For distance and directions, the destination goes after --to, never
+    positional. Add --limit or --mode only when the user asked for them. Do not run
+    anything. If the command or required values cannot be determined, set ready to
+    false and describe what is missing in missing_info. The script path is ~/.hermes/skills/maps/scripts/maps_client.py;
+    load the maps skill with skill_view only if the command syntax is unclear.'
   inputs:
   - request
-  tools: []
+  tools:
+  - skill_view
   output_schema:
     type: object
-    additionalProperties: false
-    required:
-    - operation
-    - args
     properties:
-      operation:
+      command:
         type: string
         enum:
         - search
@@ -42,167 +61,160 @@ nodes:
         - timezone
         - area
         - bbox
-        - needs_clarification
-      question:
-        type: string
       args:
-        type: object
-        additionalProperties: false
-        properties:
-          query:
-            type: string
-          lat:
-            type: number
-          lon:
-            type: number
-          to:
-            type: string
-          category:
-            type: array
-            items:
-              type: string
-          mode:
-            type: string
-            enum:
-            - driving
-            - walking
-            - cycling
-          radius:
-            type: integer
-          limit:
-            type: integer
-          bbox:
-            type: array
-            items:
-              type: number
-            minItems: 4
-            maxItems: 4
-  outputs:
-  - parsed
-  checks:
-  - schema
-  - required_args_present
-  on_fail:
-    retry: 1
-    then: stop
-  next:
-  - to: route_operation
-- id: route_operation
-  type: branch
-  goal: Send the parsed request to the command group that handles its operation.
-  true: parsed
-  inputs:
-  - parsed
-  outputs:
-  - parsed
-  checks:
-  - schema
-  next:
-  - to: run_place_lookup
-    label: operation is search
-    reverse: null
-    timezone or area: null
-  - to: run_nearby
-    label: operation is nearby or bbox
-  - to: run_route
-    label: operation is distance or directions
-  - to: report_missing
-    label: operation is needs_clarification
-- id: run_place_lookup
-  type: code
-  goal: Run the search, reverse, timezone or area command and capture its output.
-  script: scripts/run_lookup.py
-  inputs:
-  - parsed
-  outputs:
-  - command_result
-  checks:
-  - schema
-  - exit_code_zero
-  - output_not_empty
-  on_fail:
-    retry: 1
-    then: stop
-  next:
-  - to: format_answer
-- id: run_nearby
-  type: code
-  goal: Run the nearby or bbox command and capture its output.
-  script: scripts/run_nearby.py
-  inputs:
-  - parsed
-  outputs:
-  - command_result
-  checks:
-  - schema
-  - exit_code_zero
-  - output_not_empty
-  on_fail:
-    retry: 1
-    then: stop
-  next:
-  - to: format_answer
-- id: run_route
-  type: code
-  goal: Run the distance or directions command and capture its output.
-  script: scripts/run_route.py
-  inputs:
-  - parsed
-  outputs:
-  - command_result
-  checks:
-  - schema
-  - exit_code_zero
-  - output_not_empty
-  on_fail:
-    retry: 1
-    then: stop
-  next:
-  - to: format_answer
-- id: report_missing
-  type: code
-  goal: Pass the clarification question through as the command result, without running
-    any maps command.
-  script: scripts/report_missing.py
-  inputs:
-  - parsed
-  outputs:
-  - command_result
-  checks:
-  - schema
-  next:
-  - to: format_answer
-- id: format_answer
-  type: agent
-  goal: Write the final answer for the user from the command output only.
-  instructions: Use only the values in command_result. For place lists, give a numbered
-    list with name, address, distance, and the maps_url as a plain link. For routes,
-    give the distance, duration and numbered steps. For timezones, give the name,
-    UTC offset and local time. If command_result is a clarification question, ask
-    it. Never add places, addresses or coordinates that are not in command_result.
-    If the user asks whether a place is open now, report the hours field and say it
-    is community-maintained and may be out of date.
-  inputs:
-  - command_result
-  tools: []
-  output_schema:
-    type: object
-    additionalProperties: false
-    required:
-    - answer
-    - links
-    properties:
-      answer:
-        type: string
-      links:
         type: array
         items:
           type: string
+      ready:
+        type: boolean
+      missing_info:
+        type: string
+    required:
+    - command
+    - args
+    - ready
+    - missing_info
+    additionalProperties: false
+  outputs:
+  - command_plan
+  checks:
+  - schema
+  - non_empty
+  - command_in_catalog
+  - args_match_command
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: gate_plan
+- id: gate_plan
+  type: branch
+  goal: Allow the command to run only if the plan is ready and complete; otherwise
+    ask the user.
+  condition: command_plan.ready is true and command_plan.args are complete
+  'true': command_plan
+  inputs:
+  - command_plan
+  outputs:
+  - approved_plan
+  next:
+  - to: run_query
+    label: plan is ready
+  - to: ask_user
+    label: plan is not ready or ambiguous
+- id: ask_user
+  type: tool
+  goal: Ask the user for the missing location or category detail.
+  tool: clarify
+  inputs:
+  - command_plan
+  outputs:
+  - clarification
+  checks:
+  - non_empty
+  on_fail:
+    retry: 0
+    then: stop
+  next:
+  - to: parse_request
+    label: user answers
+- id: run_query
+  type: tool
+  goal: Run the approved maps_client.py command and capture its JSON output.
+  tool: terminal
+  inputs:
+  - approved_plan
+  outputs:
+  - raw_result
+  checks:
+  - schema
+  - exit_code_zero
+  - json_output_parses
+  - coordinates_in_range
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: check_open_now
+- id: check_open_now
+  type: branch
+  goal: Decide whether the user asked an open-now question and the hours field is
+    missing or unclear.
+  condition: the request asks whether a place is open now AND the matching result
+    has no hours field or unclear hours
+  'true': raw_result
+  inputs:
+  - raw_result
+  - approved_plan
+  outputs:
+  - hours_check_needed
+  next:
+  - to: verify_hours
+    label: open-now question with missing or unclear hours
+  - to: present_results
+    label: otherwise
+- id: verify_hours
+  type: agent
+  goal: Verify current opening hours for the place with web search.
+  instructions: For the place names in raw_result that lack a usable hours field,
+    run web_search for their official or listing page and their current opening hours.
+    Report only hours you can attribute to a source. If nothing reliable is found,
+    say the hours are unknown. OSM hours are community-maintained, so say so when
+    relying on them.
+  inputs:
+  - raw_result
+  - approved_plan
+  tools:
+  - web_search
+  output_schema:
+    type: object
+    properties:
+      hours_note:
+        type: string
+    required:
+    - hours_note
+    additionalProperties: false
+  outputs:
+  - hours_note
+  checks:
+  - schema
+  - non_empty
+  - grounded_in_tool_results
+  - hours_verified_or_marked_unknown
+  on_fail:
+    retry: 1
+    then: stop
+  next:
+  - to: present_results
+- id: present_results
+  type: agent
+  goal: Present the maps results as a numbered list with names, distances, and tap-to-open
+    map links.
+  instructions: Use only values in raw_result. Present a numbered list with name,
+    distance and key details, and the maps_url field for each place. For open-now
+    questions, state the hours from hours_note when it is present; hours_note is only
+    provided when verify_hours ran. Do not add places or facts that are not in the
+    tool output.
+  inputs:
+  - raw_result
+  - hours_check_needed
+  - hours_note
+  tools: []
+  output_schema:
+    type: object
+    properties:
+      answer:
+        type: string
+    required:
+    - answer
+    additionalProperties: false
   outputs:
   - final_answer
   checks:
   - schema
-  - grounded_in_command_output
+  - non_empty
+  - grounded_in_tool_results
+  - numbered_list_with_maps_url
   on_fail:
     retry: 1
     then: stop

@@ -1,111 +1,170 @@
 name: youtube-content
 version: 0.1
-goal: Turn one YouTube video's transcript into the requested format (summary by default),
-  or report that no transcript is available.
+goal: Fetch a YouTube video's transcript with the youtube helper, turn it into the
+  requested format (default summary), verify it, and return it. Stop with an explanation
+  if any gate fails.
 context_policy: fresh context per node; only the declared inputs are passed
 inputs:
   video_url:
     type: string
     from: user
-    description: YouTube URL (watch, youtu.be, shorts, embed, live) or raw 11-character
-      video ID
+    description: YouTube URL in any standard form (watch, youtu.be, shorts, embed,
+      live) or a raw 11-character video ID
   output_format:
     type: string
     from: user
-    description: one of chapters, summary, chapter_summaries, thread, blog_post, quotes;
-      empty means summary
+    description: One of chapters, summary, chapter_summaries, thread, blog, quotes.
+      Empty means summary.
   language:
     type: string
     from: user
-    description: optional language codes with fallback order, e.g. tr,en; empty means
-      default
+    description: Comma-separated language fallback chain such as tr,en. Empty means
+      any available transcript.
+check_descriptions:
+  url_is_youtube: The output gives an 11-character video_id extracted from the input,
+    and url_valid is true only when that ID was found.
+  user_approved: The approval_answer is an explicit yes to installing the youtube
+    helper environment and fetching the transcript.
+  import_check_passed: The terminal output shows the import check printed a youtube_transcript_api
+    file path from the prepared Python interpreter.
+  no_raw_pip: The terminal commands used only the activate script and pm.sync_venv,
+    with no raw pip install and no project-discovering uv run.
+  format_matches_request: The output is in the format named by output_format, or in
+    summary format when output_format is empty.
+  timestamps_match_source: Every timestamp in the output appears in the transcript
+    text or chunk it was taken from, with no invented times.
+  coherent_and_complete: The output reads as coherent prose or structure and covers
+    the video from its first chunk to its last.
 nodes:
-- id: fetch_transcript
+- id: validate_url
   type: code
-  goal: Fetch the transcript text with timestamps by running the helper script in
-    the prepared Python environment.
-  script: scripts/fetch_transcript.py
+  goal: Extract the 11-character video ID from the URL or raw ID, and mark whether
+    it is valid.
+  script: checks/validate_url.py
   inputs:
   - video_url
-  - language
   outputs:
-  - transcript
-  - language_used
+  - video_id
+  - url_valid
   checks:
   - schema
-  on_fail:
-    retry: 1
-    then: stop
+  - url_is_youtube
   next:
-  - to: check_transcript
-- id: check_transcript
+  - to: url_gate
+- id: url_gate
   type: branch
-  goal: Route on whether the transcript came back empty.
-  true: transcript
+  goal: Stop early if the URL is not a valid YouTube link or ID.
+  'true': url_valid
   inputs:
-  - transcript
-  outputs:
-  - transcript
-  checks:
-  - schema
+  - url_valid
+  outputs: []
   next:
-  - to: fetch_any_language
-    label: transcript is empty
-  - to: chunk_transcript
-    label: transcript is non-empty
-- id: fetch_any_language
-  type: code
-  goal: Retry the fetch without a language filter to get any available transcript
-    and report its language.
-  script: scripts/fetch_transcript.py
+  - to: ask_setup_approval
+    label: url is valid
+  - to: explain_failure
+    label: any other value
+- id: ask_setup_approval
+  type: tool
+  goal: Ask the user to approve installing the youtube helper environment and fetching
+    the transcript for this video.
+  tool: clarify
   inputs:
-  - video_url
+  - video_id
   outputs:
-  - transcript
-  - language_used
+  - approval_answer
   checks:
-  - schema
+  - non_empty
+  - user_approved
   on_fail:
     retry: 0
-    then: stop
+    then: explain_failure
   next:
-  - to: check_fallback
-- id: check_fallback
+  - to: setup_gate
+- id: setup_gate
   type: branch
-  goal: Stop with an unavailable notice if even the fallback transcript is empty.
-  true: transcript
+  goal: Run setup and fetch only when the user explicitly approved.
+  'true': approval_answer
   inputs:
-  - transcript
+  - approval_answer
+  outputs: []
+  next:
+  - to: setup_and_fetch
+    label: user explicitly approved
+  - to: explain_failure
+    label: anything else
+- id: setup_and_fetch
+  type: agent
+  goal: Prepare the youtube helper Python environment, verify its import, and fetch
+    the transcript as text with timestamps.
+  instructions: 'Work from the Hermes source checkout. First follow the isolated development-home
+    setup in the Package Management docs. Then run: source ./activate; python -c "import
+    pm; pm.sync_venv([''youtube''], explicit=True)"; source ./activate; python -c
+    "import youtube_transcript_api; print(youtube_transcript_api.__file__)". On Windows
+    use . .\activate.ps1 instead. Run every later command with the interpreter whose
+    import check succeeded. Never use raw pip or uv run. If a dependency is missing,
+    repeat the preparation and reactivation, then verify again. Then run python SKILL_DIR/scripts/fetch_transcript.py
+    with the video_id, --text-only --timestamps, and --language set to the language
+    input when it is not empty. If the output is empty, rerun without --language.
+    If it is still empty, set transcript_status to disabled. If the video is private
+    or unavailable, set transcript_status to unavailable. Set transcript_status to
+    ok when text was fetched. Do not write files.'
+  tools:
+  - terminal
+  inputs:
+  - video_id
+  - language
+  output_schema:
+    type: object
+    properties:
+      transcript_text:
+        type: string
+      transcript_language:
+        type: string
+      transcript_status:
+        type: string
+        enum:
+        - ok
+        - empty
+        - disabled
+        - unavailable
+    required:
+    - transcript_text
+    - transcript_language
+    - transcript_status
+    additionalProperties: false
   outputs:
-  - transcript
-  - language_used
+  - transcript_text
+  - transcript_language
+  - transcript_status
   checks:
   - schema
+  - grounded_in_tool_results
+  - import_check_passed
+  - no_raw_pip
+  on_fail:
+    retry: 1
+    then: explain_failure
   next:
-  - to: report_unavailable
-    label: transcript still empty
+  - to: transcript_gate
+- id: transcript_gate
+  type: branch
+  goal: Continue only when the transcript was fetched.
+  'true': transcript_status
+  inputs:
+  - transcript_status
+  outputs: []
+  next:
   - to: chunk_transcript
-    label: transcript found
-- id: report_unavailable
-  type: code
-  goal: Build a notice that the video has no usable transcript and suggest checking
-    the video page for subtitles.
-  script: scripts/unavailable_notice.py
-  inputs:
-  - video_url
-  outputs:
-  - result
-  checks:
-  - schema
-  next:
-  - to: present_result
+    label: status is ok
+  - to: explain_failure
+    label: any other status
 - id: chunk_transcript
   type: code
-  goal: Split transcripts over 50K characters into chunks of about 40K characters
-    with 2K overlap; otherwise return a single chunk.
-  script: scripts/chunk_transcript.py
+  goal: Split the transcript into chunks of about 40K characters with 2K overlap,
+    or keep one chunk when it is under 50K characters.
+  script: checks/chunk_transcript.py
   inputs:
-  - transcript
+  - transcript_text
   outputs:
   - chunks
   checks:
@@ -116,106 +175,133 @@ nodes:
 - id: summarize_chunk
   type: agent
   for_each: chunks
-  goal: Condense one transcript chunk into timestamped notes that keep topic shifts,
-    key claims and notable quotes.
-  instructions: Read only the chunk text you are given. Keep every timestamp exactly
-    as it appears. Do not add facts that are not in the chunk. Return the notes as
-    a single string in notes.
+  goal: Summarize one transcript chunk and keep its timestamps.
+  instructions: Summarize this chunk in plain prose and keep every timestamp it contains.
+    If it is the only chunk, keep its full detail instead of summarizing.
+  tools: []
   inputs:
   - item
-  tools: []
   output_schema:
     type: object
     properties:
-      notes:
+      chunk_notes:
         type: string
     required:
-    - notes
+    - chunk_notes
     additionalProperties: false
   outputs:
   - chunk_notes
   checks:
   - schema
-  - grounded_in_source
+  - non_empty
+  - timestamps_match_source
   on_fail:
     retry: 1
-    then: stop
+    then: explain_failure
   next:
-  - to: transform_output
-- id: transform_output
+  - to: transform
+- id: transform
   type: agent
-  goal: Write the requested output format from the chunk notes, defaulting to a 5-10
-    sentence summary.
-  instructions: 'Use output_format; if it is empty, use summary. Formats: chapters
-    (timestamped list of topic shifts), summary (5-10 sentences), chapter_summaries
-    (chapters with a short paragraph each), thread (numbered posts, each under 280
-    characters), blog_post (title, sections, key takeaways), quotes (notable quotes
-    with timestamps). If language_used differs from the requested language, state
-    the actual language. Do not add content beyond the notes. Return the body in body
-    and the language in language.'
+  goal: Turn the chunk notes into the requested output format.
+  instructions: 'Format the content by output_format. chapters: timestamped topic
+    list such as 00:00 Introduction, one line each. summary: 5-10 sentences for the
+    whole video. chapter_summaries: chapters with a short paragraph each. thread:
+    numbered posts, each under 280 characters. blog: title, sections, and key takeaways.
+    quotes: notable quotes with timestamps. If output_format is empty, use summary.'
+  tools: []
   inputs:
   - chunk_notes
   - output_format
-  - language_used
-  tools: []
   output_schema:
     type: object
     properties:
-      body:
-        type: string
-      language:
+      formatted_output:
         type: string
     required:
-    - body
-    - language
+    - formatted_output
     additionalProperties: false
   outputs:
-  - draft_output
+  - formatted_output
   checks:
   - schema
-  - grounded_in_source
-  - thread_posts_under_280_chars
+  - non_empty
+  - format_matches_request
+  - timestamps_match_source
   on_fail:
     retry: 1
-    then: stop
+    then: explain_failure
   next:
   - to: verify_output
 - id: verify_output
   type: agent
-  goal: Re-read the drafted output for coherence, correct timestamps and completeness
-    against the notes.
-  instructions: Confirm every timestamp in the draft appears in the notes, the draft
-    matches the requested format, and nothing is cut off. If a check fails, fix the
-    body minimally. Return the final text in body.
-  inputs:
-  - draft_output
-  - chunk_notes
+  goal: Re-read the formatted output for coherence, correct timestamps, and completeness
+    before it is shown.
+  instructions: Compare formatted_output with chunk_notes. Check that the flow is
+    coherent, timestamps match the source, and the output covers the video from start
+    to end. If a check fails, rewrite the output to fix it. Return the corrected text
+    as final_output.
   tools: []
+  inputs:
+  - formatted_output
+  - chunk_notes
   output_schema:
     type: object
     properties:
-      body:
+      final_output:
         type: string
     required:
-    - body
+    - final_output
     additionalProperties: false
   outputs:
-  - result
+  - final_output
   checks:
   - schema
-  - grounded_in_source
+  - non_empty
+  - coherent_and_complete
+  - timestamps_match_source
   on_fail:
     retry: 1
-    then: stop
+    then: explain_failure
   next:
-  - to: present_result
-- id: present_result
-  type: code
-  goal: Print the final result as the answer to the user.
-  script: scripts/present_result.py
+  - to: deliver
+- id: explain_failure
+  type: agent
+  goal: Tell the user which step stopped and why, in one short paragraph.
+  instructions: Use only the inputs given. An empty input means that step did not
+    run, so say it is unknown. If the URL is invalid, ask for a YouTube URL or 11-character
+    video ID. If approval was not given, say the setup was not run. If transcript_status
+    is disabled, suggest checking whether subtitles are available on the video page.
+    If it is unavailable, ask the user to verify the URL because the video may be
+    private. Return the message as final_output.
+  tools: []
   inputs:
-  - result
+  - video_url
+  - video_id
+  - approval_answer
+  - transcript_status
+  output_schema:
+    type: object
+    properties:
+      final_output:
+        type: string
+    required:
+    - final_output
+    additionalProperties: false
   outputs:
-  - final_answer
+  - final_output
   checks:
   - schema
+  - non_empty
+  next:
+  - to: deliver
+- id: deliver
+  type: code
+  goal: Return the final output as the answer.
+  script: checks/deliver.py
+  inputs:
+  - final_output
+  outputs:
+  - answer
+  checks:
+  - schema
+  - non_empty

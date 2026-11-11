@@ -5,4 +5,4 @@
 {"node": "create_draft", "type": "tool", "status": "ok", "input_keys": ["item"], "n_items": 3, "input_chars": 208, "output_chars": 287, "seconds": 0.0, "model_calls": 0}
 {"node": "read_back", "type": "tool", "status": "ok", "input_keys": ["item"], "n_items": 3, "input_chars": 277, "output_chars": 247, "seconds": 0.0, "model_calls": 0}
 {"node": "record_exceptions", "type": "code", "status": "ok", "input_keys": ["exception_items"], "n_items": null, "input_chars": 91, "output_chars": 85, "seconds": 0.01, "model_calls": 0}
-{"node": "report", "type": "code", "status": "ok", "input_keys": ["confirmed_drafts", "exceptions"], "n_items": null, "input_chars": 332, "output_chars": 341, "seconds": 0.02, "model_calls": 0}
+{"node": "report", "type": "code", "status": "ok", "input_keys": ["confirmed_drafts", "exceptions"], "n_items": null, "input_chars": 332, "output_chars": 341, "seconds": 0.01, "model_calls": 0}

@@ -1,45 +1,44 @@
 # maps workflow (generated from the maps skill)
 
-Answer one location question (geocode, reverse geocode, nearby places, distance, directions, timezone, area or bounding-box search) with scripts/maps_client.py using free OpenStreetMap data.
+Answer a location request (geocode, reverse geocode, nearby places, distance, directions, timezone, or bounding-box POI search) by running the maps_client.py script and presenting the results with map links.
 
 ```mermaid
 flowchart TD
   start(["start: request"])
   parse_request("<b>parse_request</b> (agent)<br/>gets: request")
-  route_operation{"<b>route_operation</b> (branch)<br/>gets: parsed"}
-  run_place_lookup["<b>run_place_lookup</b> (code)<br/>gets: parsed"]
-  run_nearby["<b>run_nearby</b> (code)<br/>gets: parsed"]
-  run_route["<b>run_route</b> (code)<br/>gets: parsed"]
-  report_missing["<b>report_missing</b> (code)<br/>gets: parsed"]
-  format_answer("<b>format_answer</b> (agent)<br/>gets: command_result")
-  format_answer --> finish(["final answer"])
+  gate_plan{"<b>gate_plan</b> (branch)<br/>gets: command_plan"}
+  ask_user[["<b>ask_user</b> (tool)<br/>gets: command_plan"]]
+  run_query[["<b>run_query</b> (tool)<br/>gets: approved_plan"]]
+  check_open_now{"<b>check_open_now</b> (branch)<br/>gets: raw_result, approved_plan"}
+  verify_hours("<b>verify_hours</b> (agent)<br/>gets: raw_result, approved_plan")
+  present_results("<b>present_results</b> (agent)<br/>gets: raw_result, hours_check_needed, hours_note")
+  present_results --> finish(["final answer"])
   start --> parse_request
-  parse_request --> route_operation
-  route_operation -->|operation is search| run_place_lookup
-  route_operation -->|operation is nearby or bbox| run_nearby
-  route_operation -->|operation is distance or directions| run_route
-  route_operation -->|operation is needs_clarification| report_missing
-  run_place_lookup --> format_answer
-  run_nearby --> format_answer
-  run_route --> format_answer
-  report_missing --> format_answer
+  parse_request --> gate_plan
+  gate_plan -->|plan is ready| run_query
+  gate_plan -->|plan is not ready or ambiguous| ask_user
+  ask_user -->|user answers| parse_request
+  run_query --> check_open_now
+  check_open_now -->|open-now question with missing or unclear hours| verify_hours
+  check_open_now -->|otherwise| present_results
+  verify_hours --> present_results
   classDef agent fill:#fff3cd,stroke:#b58900;
   classDef code fill:#e7f1ff,stroke:#2b6cb0;
   classDef tool fill:#e6ffed,stroke:#2f855a;
   classDef branch fill:#fde8e8,stroke:#c53030;
-  class parse_request,format_answer agent;
-  class route_operation branch;
-  class run_place_lookup,run_nearby,run_route,report_missing code;
+  class ask_user,run_query tool;
+  class parse_request,verify_hours,present_results agent;
+  class gate_plan,check_open_now branch;
 ```
 
 ## What each node receives
 
 | Node | Type | Receives (only this) | Tools allowed | Produces | Checks |
 |---|---|---|---|---|---|
-| parse_request | agent | request | - | parsed | schema, required_args_present |
-| route_operation | branch | parsed | - | parsed | schema |
-| run_place_lookup | code | parsed | - | command_result | schema, exit_code_zero, output_not_empty |
-| run_nearby | code | parsed | - | command_result | schema, exit_code_zero, output_not_empty |
-| run_route | code | parsed | - | command_result | schema, exit_code_zero, output_not_empty |
-| report_missing | code | parsed | - | command_result | schema |
-| format_answer | agent | command_result | - | final_answer | schema, grounded_in_command_output |
+| parse_request | agent | request | skill_view | command_plan | schema, non_empty, command_in_catalog, args_match_command |
+| gate_plan | branch | command_plan | - | approved_plan | - |
+| ask_user | tool | command_plan | clarify | clarification | non_empty |
+| run_query | tool | approved_plan | terminal | raw_result | schema, exit_code_zero, json_output_parses, coordinates_in_range |
+| check_open_now | branch | raw_result, approved_plan | - | hours_check_needed | - |
+| verify_hours | agent | raw_result, approved_plan | web_search | hours_note | schema, non_empty, grounded_in_tool_results, hours_verified_or_marked_unknown |
+| present_results | agent | raw_result, hours_check_needed, hours_note | - | final_answer | schema, non_empty, grounded_in_tool_results, numbered_list_with_maps_url |

@@ -10,7 +10,7 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(HERE))
 import world_api as W
 from grade import grade, load_calls, extract_json, REASONS
-from workflow_tools import load, validate
+from workflow_tools import load, validate, BUILTIN_CHECKS
 
 class StepFailed(Exception): pass
 
@@ -110,8 +110,20 @@ def run_branch(node, scoped):
     return {"ok_items": [{"invoice_id": v["invoice_id"], "po_id": facts[v["invoice_id"]]["po_id"], "total": facts[v["invoice_id"]]["total"]} for v in ok],
             "exception_items": other}
 
-def node_checks(node, scoped, items, out):
+def judge(rule, node_id, out, mode):
+    """A custom check: a separate model call that sees ONLY the rule and this node's output."""
+    if mode == "code":
+        return True, "judge skipped in code mode"
+    prompt = ("You are grading one step of an automated workflow. Answer with ONLY one JSON object: "
+              '{"pass": true or false, "why": "one short sentence"}.\n'
+              f"RULE THAT MUST HOLD: {rule}\nSTEP OUTPUT:\n{json.dumps(out)[:12000]}")
+    text, _ = call_hermes(prompt, pathlib.Path(tempfile.mkdtemp()), f"judge-{node_id}")
+    v = extract_json(text) or {}
+    return bool(v.get("pass")), str(v.get("why", "judge gave no verdict"))
+
+def node_checks(node, scoped, items, out, spec=None, mode="code"):
     names = node.get("checks", [])
+    descs = (spec or {}).get("check_descriptions") or {}
     for c in names:
         if c in ("schema", "grounded_in_tool_results", "readback_matches_total"): continue   # done where the data is produced
         if c == "non_empty":
@@ -121,8 +133,11 @@ def node_checks(node, scoped, items, out):
         elif c == "reasons_are_bare_codes":
             bad = [e for e in out["final_answer"]["exceptions"] if e["reason"] not in REASONS]
             if bad: raise StepFailed(f"report: reasons are not bare codes: {bad[:2]}")
+        elif c in descs:
+            ok, why = judge(descs[c], node["id"], out, mode)
+            if not ok: raise StepFailed(f"{node['id']}: check '{c}' failed the judge: {why}")
         else:
-            raise StepFailed(f"{node['id']}: unknown check '{c}' (refusing to skip it silently)")
+            raise StepFailed(f"{node['id']}: unknown check '{c}' and no rule for it in check_descriptions")
 
 def run_workflow(spec, inputs, mode, usage_dir):
     store, trace, usages = dict(inputs), [], []
@@ -144,7 +159,7 @@ def run_workflow(spec, inputs, mode, usage_dir):
             elif node["type"] == "code": out = run_code(node, scoped)
             elif node["type"] == "branch": out = run_branch(node, scoped)
             if set(out) != set(node["outputs"]): raise StepFailed(f"{node['id']}: produced {sorted(out)} but declared {node['outputs']}")
-            node_checks(node, scoped, items, out)
+            node_checks(node, scoped, items, out, spec, mode)
         except StepFailed as e:
             trace.append({"node": node["id"], "status": "FAILED", "error": str(e), "input_keys": sorted(declared)})
             raise

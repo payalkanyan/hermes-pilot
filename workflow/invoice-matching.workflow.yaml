@@ -4,6 +4,7 @@ name: invoice-matching
 version: 0.1
 goal: Match one folder of supplier invoices to purchase orders and deliveries, create draft bills for the ones that pass, and report the rest.
 context_policy: fresh context per node; only the declared inputs are passed
+tools_provided: [list_invoices, get_invoice, get_purchase_order, get_deliveries, create_draft_bill, get_draft_bill]
 inputs:
   folder: {type: string, from: user, description: mailbox folder id in the invoice tools}
   month:  {type: string, from: user, description: "period like 2026-10"}

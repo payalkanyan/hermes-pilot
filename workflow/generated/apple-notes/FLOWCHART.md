@@ -1,53 +1,52 @@
 # apple-notes workflow (generated from the apple-notes skill)
 
-Search, create, or export Apple Notes through the memo CLI on macOS, with human approval before any note is written or exported.
+Run one Apple Notes operation through the memo CLI after the user approves the exact command, or report why it was not run.
 
 ```mermaid
 flowchart TD
-  start(["start: action, query, folder, note_text, export_format"])
-  preflight["<b>preflight</b> (code)<br/>gets: -"]
-  route_action{"<b>route_action</b> (branch)<br/>gets: action"}
-  search_notes["<b>search_notes</b> (code)<br/>gets: query, folder"]
-  compose_note("<b>compose_note</b> (agent)<br/>gets: note_text, folder")
-  approve_write["<b>approve_write</b> (code)<br/>gets: draft"]
-  create_note["<b>create_note</b> (code)<br/>gets: approved_draft"]
-  export_notes["<b>export_notes</b> (code)<br/>gets: folder, export_format"]
-  approve_export["<b>approve_export</b> (code)<br/>gets: export_plan"]
-  run_export["<b>run_export</b> (code)<br/>gets: approved_export"]
-  report["<b>report</b> (code)<br/>gets: matches, created_note, export_path"]
-  report --> finish(["final answer"])
-  start --> preflight
-  preflight --> route_action
-  route_action -->|action is search| search_notes
-  route_action -->|action is create| compose_note
-  route_action -->|action is export| export_notes
-  search_notes --> report
-  compose_note --> approve_write
-  approve_write --> create_note
-  create_note --> report
-  export_notes --> approve_export
-  approve_export --> run_export
-  run_export --> report
+  start(["start: request, folder"])
+  classify_request("<b>classify_request</b> (agent)<br/>gets: request, folder")
+  route_scope{"<b>route_scope</b> (branch)<br/>gets: operation_plan"}
+  compose_command("<b>compose_command</b> (agent)<br/>gets: operation_plan")
+  approve_command[["<b>approve_command</b> (tool)<br/>gets: command_plan"]]
+  route_approval{"<b>route_approval</b> (branch)<br/>gets: approval"}
+  check_prereqs[["<b>check_prereqs</b> (tool)<br/>gets: -"]]
+  route_prereq{"<b>route_prereq</b> (branch)<br/>gets: prereq_status"}
+  run_memo[["<b>run_memo</b> (tool)<br/>gets: command_plan"]]
+  report_result["<b>report_result</b> (code)<br/>gets: operation_plan, approval, prereq_status, memo_output"]
+  report_result --> finish(["final answer"])
+  start --> classify_request
+  classify_request --> route_scope
+  route_scope -->|applies to Apple Notes and operation is set| compose_command
+  route_scope -->|out of scope or operation is none| report_result
+  compose_command --> approve_command
+  approve_command --> route_approval
+  route_approval -->|approved| check_prereqs
+  route_approval -->|declined| report_result
+  check_prereqs --> route_prereq
+  route_prereq -->|prerequisites pass| run_memo
+  route_prereq -->|macOS or memo missing| report_result
+  run_memo --> report_result
   classDef agent fill:#fff3cd,stroke:#b58900;
   classDef code fill:#e7f1ff,stroke:#2b6cb0;
   classDef tool fill:#e6ffed,stroke:#2f855a;
   classDef branch fill:#fde8e8,stroke:#c53030;
-  class compose_note agent;
-  class route_action branch;
-  class preflight,search_notes,approve_write,create_note,export_notes,approve_export,run_export,report code;
+  class approve_command,check_prereqs,run_memo tool;
+  class classify_request,compose_command agent;
+  class report_result code;
+  class route_scope,route_approval,route_prereq branch;
 ```
 
 ## What each node receives
 
 | Node | Type | Receives (only this) | Tools allowed | Produces | Checks |
 |---|---|---|---|---|---|
-| preflight | code | - | - | env_ok | schema, env_ok_is_true |
-| route_action | branch | action | - | route | schema |
-| search_notes | code | query, folder | - | matches | schema |
-| compose_note | agent | note_text, folder | - | draft | schema, grounded_in_input |
-| approve_write | code | draft | - | approved_draft | human_approved |
-| create_note | code | approved_draft | - | created_note | schema, readback_matches_title |
-| export_notes | code | folder, export_format | - | export_plan | schema, format_is_html_or_markdown |
-| approve_export | code | export_plan | - | approved_export | human_approved |
-| run_export | code | approved_export | - | export_path | schema, path_exists |
-| report | code | matches, created_note, export_path | - | final_answer | schema |
+| classify_request | agent | request, folder | - | operation_plan | schema, non_empty |
+| route_scope | branch | operation_plan | - | operation_plan | - |
+| compose_command | agent | operation_plan | - | command_plan | schema, memo_command_is_documented, interactive_flag_matches |
+| approve_command | tool | command_plan | clarify | approval | approval_recorded |
+| route_approval | branch | approval | - | approval | - |
+| check_prereqs | tool | - | terminal | prereq_status | prereq_macos_memo_present |
+| route_prereq | branch | prereq_status | - | prereq_status | - |
+| run_memo | tool | command_plan | terminal | memo_output | grounded_in_tool_results, exit_code_zero |
+| report_result | code | operation_plan, approval, prereq_status, memo_output | - | final_answer | schema, non_empty |
