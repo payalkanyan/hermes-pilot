@@ -1,0 +1,218 @@
+name: process-invoice-mailbox-folder
+version: 0.1
+goal: Match one mailbox folder of supplier invoices for a given period against purchase
+  orders and deliveries, then produce a verdict per invoice and a summary report.
+context_policy: fresh context per node; only the declared inputs are passed
+inputs:
+  folder:
+    type: string
+    from: user
+    description: Name of the mailbox folder in the invoice tools, for example F10
+  period:
+    type: string
+    from: user
+    description: Accounting month to match, as YYYY-MM, for example 2026-10
+tools_provided:
+- list_invoices
+- get_invoice
+- get_purchase_order
+- get_deliveries
+check_descriptions:
+  all_items_collected: Every invoice id in the input list has exactly one returned
+    fact record with a non-empty invoice_id, and the count of records equals the count
+    of ids.
+  user_approves_write: The user has explicitly approved writing and running the generated
+    decision script in this session before the write proceeds.
+  no_invented_values: Every supplier, number, date, sku, qty, price and total in the
+    output appears verbatim in the tool results recorded for that invoice, and po_lines
+    is empty when po_found is false.
+  verdict_per_invoice: The verdicts list has exactly one entry per input invoice,
+    each with a verdict of matched, mismatch, duplicate, out_of_period, or no_po.
+  report_has_all_verdicts: The report lists every verdict once and states the count
+    of each verdict type.
+nodes:
+- id: list_folder_invoices
+  type: tool
+  tool: list_invoices
+  goal: List the invoices in the given mailbox folder.
+  inputs:
+  - folder
+  outputs:
+  - invoices
+  checks:
+  - non_empty
+  next:
+  - to: fetch_invoice_facts
+- id: fetch_invoice_facts
+  type: agent
+  for_each: invoices
+  parallel: 10
+  goal: Collect the invoice, purchase order and delivery facts for this one invoice.
+  inputs:
+  - item
+  tools:
+  - get_invoice
+  - get_purchase_order
+  - get_deliveries
+  instructions: Call get_invoice with the invoice_id. Then call get_purchase_order
+    with the po_ref from the invoice. Then call get_deliveries for that purchase order.
+    Copy values exactly as the tools return them. If get_purchase_order says not found,
+    set po_found to false and leave po_lines empty. If get_deliveries says none found,
+    leave delivered empty. Never guess or fill in a value.
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - invoice_id
+    - supplier
+    - number
+    - date
+    - po_id
+    - inv_lines
+    - tax
+    - total
+    - po_found
+    - po_lines
+    - delivered
+    properties:
+      invoice_id:
+        type: string
+      supplier:
+        type: string
+      number:
+        type: string
+      date:
+        type: string
+      po_id:
+        type: string
+      inv_lines:
+        type: array
+        items:
+          type: object
+          required:
+          - sku
+          - qty
+          - unit_price
+          properties:
+            sku:
+              type: string
+            qty:
+              type: number
+            unit_price:
+              type: number
+      tax:
+        type: number
+      total:
+        type: number
+      po_found:
+        type: boolean
+      po_lines:
+        type: array
+        items:
+          type: object
+          required:
+          - sku
+          - qty
+          - unit_price
+          properties:
+            sku:
+              type: string
+            qty:
+              type: number
+            unit_price:
+              type: number
+      delivered:
+        type: array
+        items:
+          type: object
+          required:
+          - sku
+          - qty
+          properties:
+            sku:
+              type: string
+            qty:
+              type: number
+  outputs:
+  - facts
+  checks:
+  - schema
+  - grounded_in_tool_results
+  - no_invented_values
+  next:
+  - to: facts_gate
+- id: facts_gate
+  type: branch
+  goal: Continue to the decision step only if every invoice returned its facts.
+  inputs:
+  - facts
+  outputs: []
+  checks:
+  - all_items_collected
+  next:
+  - to: approve_script_write
+    label: all facts collected
+  - to: report_gaps
+    label: some missing
+- id: approve_script_write
+  type: branch
+  goal: Ask the user to approve writing and running the decision script before any
+    file is written.
+  inputs:
+  - facts
+  outputs: []
+  checks:
+  - user_approves_write
+  next:
+  - to: write_decide_script
+    label: approved
+  - to: report_gaps
+    label: declined
+- id: write_decide_script
+  type: tool
+  tool: write_file
+  goal: Write the verdict script that classifies each invoice as matched, mismatch,
+    duplicate, out_of_period or no_po.
+  inputs:
+  - period
+  outputs:
+  - script_path
+  checks:
+  - non_empty
+  next:
+  - to: decide_verdicts
+- id: decide_verdicts
+  type: code
+  goal: Run the verdict script over the collected facts for the given period and produce
+    one verdict per invoice.
+  inputs:
+  - facts
+  - period
+  - script_path
+  outputs:
+  - verdicts
+  checks:
+  - verdict_per_invoice
+  next:
+  - to: build_report
+- id: report_gaps
+  type: code
+  goal: List the invoices that could not be collected or were not approved, and why.
+  inputs:
+  - facts
+  outputs:
+  - gap_report
+  checks:
+  - non_empty
+  next:
+  - to: build_report
+- id: build_report
+  type: code
+  goal: Build the summary report of verdicts, or of gaps if the run stopped early.
+  inputs:
+  - verdicts
+  outputs:
+  - report
+  checks:
+  - report_has_all_verdicts
+  next: []

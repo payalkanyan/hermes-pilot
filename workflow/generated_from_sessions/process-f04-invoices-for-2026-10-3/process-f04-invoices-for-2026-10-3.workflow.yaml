@@ -1,0 +1,239 @@
+name: invoice-matching-workflow
+version: 0.1
+goal: Match each supplier invoice in a mailbox folder for a given month to its purchase
+  order and delivery records, decide ok or exception per invoice, and create draft
+  bills for the matched ones after user approval.
+context_policy: fresh context per node; only the declared inputs are passed
+inputs:
+  folder:
+    type: string
+    from: user
+    description: Mailbox folder id held in the invoice tools, for example F04. Not
+      a path on disk.
+  period:
+    type: string
+    from: user
+    description: Invoice month to process in YYYY-MM form, for example 2026-10.
+tools_provided:
+- list_invoices
+- get_invoice
+- get_purchase_order
+- get_deliveries
+- create_draft_bill
+- get_draft_bill
+check_descriptions:
+  environment_probe_ok: The initial browser probe printed its placeholder output with
+    exit code 0.
+  user_approval_recorded: The gate records an explicit yes or no from the user for
+    the named action before choosing a label.
+  one_verdict_per_invoice: The verdicts list has exactly one entry per invoice_id
+    in invoice_facts, each verdict being ok, out_of_period, duplicate, arithmetic_error,
+    missing_po or price_mismatch.
+  draft_matches_invoice: The draft bill read back has the same invoice_id, po_id and
+    total as the matched invoice it was created for.
+  every_invoice_accounted_for: Each invoice_id from the folder appears exactly once,
+    either in matched with a draft_id or in exceptions with a reason.
+nodes:
+- id: list_invoices
+  type: tool
+  tool: list_invoices
+  goal: List the invoices in the mailbox folder and return their invoice ids.
+  inputs:
+  - folder
+  outputs:
+  - invoice_ids
+  checks:
+  - non_empty
+  - environment_probe_ok
+  next:
+  - to: collect_invoice_facts
+- id: collect_invoice_facts
+  type: agent
+  for_each: invoice_ids
+  parallel: 4
+  goal: Collect the facts for this one invoice, its purchase order and its deliveries.
+  inputs:
+  - item
+  tools:
+  - get_invoice
+  - get_purchase_order
+  - get_deliveries
+  instructions: Look up the invoice, then the PO named in its po_ref, then that PO's
+    deliveries. Copy values exactly as the tools return them. If get_purchase_order
+    says not found, set po_found to false and leave po_lines empty. If get_deliveries
+    says none found, leave delivered empty. Never guess or fill in a value. Use only
+    these tools.
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - invoice_id
+    - supplier
+    - number
+    - date
+    - po_id
+    - inv_lines
+    - tax
+    - total
+    - po_found
+    - po_lines
+    - delivered
+    properties:
+      invoice_id:
+        type: string
+      supplier:
+        type: string
+      number:
+        type: string
+      date:
+        type: string
+      po_id:
+        type: string
+      inv_lines:
+        type: array
+        items:
+          type: object
+          required:
+          - sku
+          - qty
+          - unit_price
+          properties:
+            sku:
+              type: string
+            qty:
+              type: number
+            unit_price:
+              type: number
+      tax:
+        type: number
+      total:
+        type: number
+      po_found:
+        type: boolean
+      po_lines:
+        type: array
+        items:
+          type: object
+          required:
+          - sku
+          - qty
+          - unit_price
+          properties:
+            sku:
+              type: string
+            qty:
+              type: number
+            unit_price:
+              type: number
+      delivered:
+        type: array
+        items:
+          type: object
+          required:
+          - sku
+          - qty
+          properties:
+            sku:
+              type: string
+            qty:
+              type: number
+  outputs:
+  - invoice_facts
+  checks:
+  - schema
+  - grounded_in_tool_results
+  next:
+  - to: gate_write_facts
+- id: gate_write_facts
+  type: branch
+  goal: Ask the user to approve writing the collected facts to a temp file and running
+    the decision script.
+  inputs:
+  - invoice_facts
+  outputs: []
+  checks:
+  - user_approval_recorded
+  next:
+  - to: write_and_run_decision
+    label: approved
+  - to: compile_report
+    label: rejected
+- id: write_and_run_decision
+  type: code
+  goal: Write the facts and a deterministic decision script to temp files, run it,
+    and map each invoice to a verdict; ok means matched.
+  inputs:
+  - invoice_facts
+  - period
+  outputs:
+  - verdicts
+  - matched_invoices
+  - exceptions
+  checks:
+  - one_verdict_per_invoice
+  next:
+  - to: gate_draft_bills
+- id: gate_draft_bills
+  type: branch
+  goal: Ask the user to approve creating draft bills for the matched invoices.
+  inputs:
+  - matched_invoices
+  - exceptions
+  outputs: []
+  checks:
+  - user_approval_recorded
+  next:
+  - to: create_draft_bills
+    label: approved
+  - to: compile_report
+    label: rejected
+- id: create_draft_bills
+  type: agent
+  for_each: matched_invoices
+  goal: Create a draft bill for one matched invoice and read it back.
+  inputs:
+  - item
+  tools:
+  - create_draft_bill
+  - get_draft_bill
+  instructions: Create one draft bill with the invoice_id, po_id and total of this
+    item, then read it back with get_draft_bill using the returned draft_id. Copy
+    values exactly as returned. Never retry with different values.
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - draft_id
+    - invoice_id
+    - po_id
+    - total
+    properties:
+      draft_id:
+        type: string
+      invoice_id:
+        type: string
+      po_id:
+        type: string
+      total:
+        type: number
+  outputs:
+  - draft_bills
+  checks:
+  - schema
+  - grounded_in_tool_results
+  - draft_matches_invoice
+  next:
+  - to: compile_report
+- id: compile_report
+  type: code
+  goal: Assemble the final matched and exceptions result from the draft bills and
+    verdicts.
+  inputs:
+  - matched_invoices
+  - exceptions
+  - draft_bills
+  outputs:
+  - final_result
+  checks:
+  - every_invoice_accounted_for
+  next: []

@@ -1,0 +1,230 @@
+name: invoice-matching-workflow
+version: 0.1
+goal: Match the supplier invoices in one mailbox folder for one period against their
+  purchase orders and goods receipts, then create a draft bill for each clean match.
+  Stop and report if any invoice has an exception.
+context_policy: fresh context per node; only the declared inputs are passed
+inputs:
+  folder:
+    type: string
+    from: user
+    description: Mailbox folder name in the invoice tools, for example F01.
+  period:
+    type: string
+    from: user
+    description: Invoice month to process in YYYY-MM form, for example 2026-10.
+tools_provided:
+- list_invoices
+- get_invoice
+- get_purchase_order
+- get_deliveries
+- create_draft_bill
+- get_draft_bill
+check_descriptions:
+  verdicts_cover_all_invoices: The verdicts list has exactly one entry per invoice
+    in the folder listing, with no invoice missing or repeated.
+  ready_for_drafts: Every invoice verdict is ok and the exceptions list is empty,
+    so draft bills may be created.
+  draft_matches_invoice: The read-back draft bill has the same invoice_id, po_id and
+    total as the matched invoice record.
+nodes:
+- id: list_folder
+  type: tool
+  tool: list_invoices
+  goal: List the invoices in the mailbox folder.
+  inputs:
+  - folder
+  outputs:
+  - invoices
+  checks:
+  - non_empty
+  - grounded_in_tool_results
+  next:
+  - to: collect_facts
+- id: collect_facts
+  type: agent
+  for_each: invoices
+  parallel: 4
+  goal: Collect the invoice, purchase order and delivery facts for this one invoice.
+  inputs:
+  - item
+  tools:
+  - get_invoice
+  - get_purchase_order
+  - get_deliveries
+  instructions: Call get_invoice with the invoice_id, then get_purchase_order with
+    the po_ref from the invoice, then get_deliveries for that PO. Copy values exactly
+    as the tools return them. If get_purchase_order says not found, set po_found to
+    false and leave po_lines empty. If get_deliveries says none found, leave delivered
+    empty. Never guess or fill in a value.
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - invoice_id
+    - supplier
+    - number
+    - date
+    - po_id
+    - inv_lines
+    - tax
+    - total
+    - po_found
+    - po_lines
+    - delivered
+    properties:
+      invoice_id:
+        type: string
+      supplier:
+        type: string
+      number:
+        type: string
+      date:
+        type: string
+      po_id:
+        type: string
+      inv_lines:
+        type: array
+        items:
+          type: object
+          required:
+          - sku
+          - qty
+          - unit_price
+          properties:
+            sku:
+              type: string
+            qty:
+              type: number
+            unit_price:
+              type: number
+      tax:
+        type: number
+      total:
+        type: number
+      po_found:
+        type: boolean
+      po_lines:
+        type: array
+        items:
+          type: object
+          required:
+          - sku
+          - qty
+          - unit_price
+          properties:
+            sku:
+              type: string
+            qty:
+              type: number
+            unit_price:
+              type: number
+      delivered:
+        type: array
+        items:
+          type: object
+          required:
+          - sku
+          - qty
+          properties:
+            sku:
+              type: string
+            qty:
+              type: number
+  outputs:
+  - facts
+  checks:
+  - schema
+  - grounded_in_tool_results
+  next:
+  - to: decide_verdicts
+- id: decide_verdicts
+  type: code
+  goal: 'Apply the matching rules to every invoice''s facts: period, duplicates, arithmetic,
+    PO presence and unit prices, producing verdicts, matched invoices and exceptions.'
+  inputs:
+  - facts
+  - period
+  outputs:
+  - verdicts
+  - matched
+  - exceptions
+  checks:
+  - verdicts_cover_all_invoices
+  next:
+  - to: gate_drafts
+- id: gate_drafts
+  type: branch
+  goal: Proceed to draft creation only if there are no exceptions.
+  inputs:
+  - exceptions
+  outputs: []
+  checks:
+  - ready_for_drafts
+  next:
+  - to: create_drafts
+    label: no exceptions
+  - to: report_exceptions
+    label: exceptions found
+- id: create_drafts
+  type: agent
+  for_each: matched
+  parallel: 4
+  goal: Create one draft bill for this matched invoice and read it back to confirm
+    it.
+  inputs:
+  - item
+  tools:
+  - create_draft_bill
+  - get_draft_bill
+  instructions: Call create_draft_bill once with the invoice_id, po_id and total of
+    this item. Then call get_draft_bill with the returned draft_id and compare invoice_id,
+    po_id and total. Report the draft_id exactly as returned. Do not create a second
+    draft for the same item.
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - invoice_id
+    - po_id
+    - draft_id
+    - total
+    properties:
+      invoice_id:
+        type: string
+      po_id:
+        type: string
+      draft_id:
+        type: string
+      total:
+        type: number
+  outputs:
+  - drafts
+  checks:
+  - schema
+  - grounded_in_tool_results
+  - draft_matches_invoice
+  next:
+  - to: compile_result
+- id: compile_result
+  type: code
+  goal: Assemble the final result listing each matched invoice with its PO and draft
+    id, and the exceptions list.
+  inputs:
+  - drafts
+  - exceptions
+  outputs:
+  - result
+  checks:
+  - non_empty
+  next: []
+- id: report_exceptions
+  type: code
+  goal: List each exception with its invoice and reason, and create no drafts.
+  inputs:
+  - exceptions
+  outputs:
+  - gap_report
+  checks:
+  - non_empty
+  next: []

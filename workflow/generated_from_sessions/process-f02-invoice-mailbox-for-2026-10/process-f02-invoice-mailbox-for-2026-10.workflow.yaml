@@ -1,0 +1,219 @@
+name: invoice-mailbox-match-and-draft
+version: 0.1
+goal: For one mailbox folder and period, collect each invoice's facts, match it against
+  its purchase order and deliveries, and create a draft bill for each clean match.
+context_policy: fresh context per node; only the declared inputs are passed
+inputs:
+  mailbox_folder:
+    type: string
+    from: user
+    description: Invoice mailbox folder id to process, for example F02
+  period:
+    type: string
+    from: user
+    description: Invoice month to process as YYYY-MM, for example 2026-10
+tools_provided:
+- list_invoices
+- get_invoice
+- get_purchase_order
+- get_deliveries
+- create_draft_bill
+- get_draft_bill
+check_descriptions:
+  verdict_rules_applied: 'Each verdict is one of ok, duplicate, out_of_period, arithmetic_error,
+    missing_po, price_mismatch, and matches the rule order: period, then duplicate
+    (supplier+number seen earlier), then total arithmetic within 0.005, then PO found,
+    then every SKU priced within 1 percent of the PO price.'
+  every_invoice_has_verdict: There is exactly one verdict entry for every invoice
+    in the input list, with no invoice missing or repeated.
+  draft_readback_matches: For each draft, the read-back draft_id, invoice_id, po_id
+    and total equal the values that were sent to create_draft_bill.
+  every_invoice_accounted_for: Every invoice id from the input list appears exactly
+    once either in matched with a draft_id or in exceptions with a reason.
+nodes:
+- id: list_invoices
+  type: tool
+  tool: list_invoices
+  goal: List the invoices in the mailbox folder.
+  inputs:
+  - mailbox_folder
+  outputs:
+  - invoices
+  checks:
+  - non_empty
+  next:
+  - to: collect_facts
+- id: collect_facts
+  type: agent
+  for_each: invoices
+  parallel: 5
+  goal: Collect the facts for this one invoice from the invoice tools.
+  inputs:
+  - item
+  tools:
+  - get_invoice
+  - get_purchase_order
+  - get_deliveries
+  instructions: Look up the invoice by invoice_id, then the purchase order named in
+    its po_ref, then that PO's deliveries. Copy values exactly as the tools return
+    them. If get_purchase_order says not found, set po_found to false and leave po_lines
+    empty. If get_deliveries says none found, leave delivered empty. Never guess or
+    fill in a value.
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - invoice_id
+    - supplier
+    - number
+    - date
+    - po_id
+    - inv_lines
+    - tax
+    - total
+    - po_found
+    - po_lines
+    - delivered
+    properties:
+      invoice_id:
+        type: string
+      supplier:
+        type: string
+      number:
+        type: string
+      date:
+        type: string
+      po_id:
+        type: string
+      inv_lines:
+        type: array
+        items:
+          type: object
+          required:
+          - sku
+          - qty
+          - unit_price
+          properties:
+            sku:
+              type: string
+            qty:
+              type: number
+            unit_price:
+              type: number
+      tax:
+        type: number
+      total:
+        type: number
+      po_found:
+        type: boolean
+      po_lines:
+        type: array
+        items:
+          type: object
+          required:
+          - sku
+          - qty
+          - unit_price
+          properties:
+            sku:
+              type: string
+            qty:
+              type: number
+            unit_price:
+              type: number
+      delivered:
+        type: array
+        items:
+          type: object
+          required:
+          - sku
+          - qty
+          properties:
+            sku:
+              type: string
+            qty:
+              type: number
+  outputs:
+  - facts
+  checks:
+  - schema
+  - grounded_in_tool_results
+  next:
+  - to: decide_verdicts
+- id: decide_verdicts
+  type: code
+  goal: Apply the matching rules to every collected invoice fact set in order and
+    return a verdict per invoice plus the list of clean matches to draft.
+  inputs:
+  - facts
+  - period
+  outputs:
+  - verdicts
+  - matched
+  checks:
+  - non_empty
+  - verdict_rules_applied
+  - every_invoice_has_verdict
+  next:
+  - to: approve_matches
+- id: approve_matches
+  type: branch
+  goal: Continue to drafting only if at least one invoice matched cleanly; otherwise
+    skip to the summary.
+  inputs:
+  - matched
+  outputs: []
+  checks: []
+  next:
+  - to: create_drafts
+    label: matched invoices present
+  - to: build_summary
+    label: no matches
+- id: create_drafts
+  type: agent
+  for_each: matched
+  parallel: 1
+  goal: Create one draft bill for this matched invoice and read it back.
+  inputs:
+  - item
+  tools:
+  - create_draft_bill
+  - get_draft_bill
+  instructions: Call create_draft_bill once with the invoice_id, po_id and total from
+    the item. Then call get_draft_bill with the returned draft_id and confirm the
+    fields match. Do not create a second draft for the same invoice.
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - invoice_id
+    - po_id
+    - draft_id
+    properties:
+      invoice_id:
+        type: string
+      po_id:
+        type: string
+      draft_id:
+        type: string
+  outputs:
+  - drafts
+  checks:
+  - schema
+  - grounded_in_tool_results
+  - draft_readback_matches
+  next:
+  - to: build_summary
+- id: build_summary
+  type: code
+  goal: Assemble the final result with matched drafts and exceptions, accounting for
+    every invoice.
+  inputs:
+  - drafts
+  - verdicts
+  outputs:
+  - result
+  checks:
+  - non_empty
+  - every_invoice_accounted_for
+  next: []

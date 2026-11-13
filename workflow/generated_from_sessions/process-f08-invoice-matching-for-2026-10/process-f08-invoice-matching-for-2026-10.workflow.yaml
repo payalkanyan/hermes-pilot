@@ -1,0 +1,336 @@
+name: invoice-matching-f08
+version: 0.1
+goal: Match one mailbox folder of supplier invoices to purchase orders for a given
+  period, with approval gates before any file write, script run, or draft bill creation,
+  then report matched and exception invoices.
+context_policy: fresh context per node; only the declared inputs are passed
+inputs:
+  folder:
+    type: string
+    from: user
+    description: Mailbox folder id in the invoice tools, e.g. F08
+  period:
+    type: string
+    from: user
+    description: Invoice month to process in YYYY-MM form, e.g. 2026-10
+tools_provided:
+- list_invoices
+- get_invoice
+- get_purchase_order
+- get_deliveries
+- create_draft_bill
+- get_draft_bill
+check_descriptions:
+  every_invoice_has_facts: Each invoice id from the folder listing has exactly one
+    facts object, and no facts object is missing a required field.
+  facts_file_matches_facts: The file at facts_path parses as a JSON array with the
+    same number of entries and the same invoice_ids as the facts input.
+  user_approves_decide_script: A human reviewer replies approve to the shown decide
+    script and its run plan (read-only over facts, prints verdicts) before the script
+    is written or run.
+  user_approves_drafts: A human reviewer replies approve to the list of matched invoices
+    and planned draft bills before any draft bill is created.
+  every_matched_has_draft: Each matched invoice has exactly one draft bill with a
+    draft_id, and no draft_id is repeated.
+  draft_matches_request: The read-back draft bill has the same invoice_id, po_id and
+    total as the draft that was created.
+  verdicts_cover_all_invoices: The verdicts list has exactly one verdict per invoice_id
+    and every verdict is one of ok, out_of_period, duplicate, missing_po, price_mismatch,
+    quantity_exceeds_delivery, arithmetic_error.
+  final_report_covers_all_invoices: Every invoice id appears exactly once in either
+    matched or exceptions, with a reason for each exception.
+nodes:
+- id: list_folder
+  type: tool
+  tool: list_invoices
+  goal: List the invoices in the mailbox folder.
+  inputs:
+  - folder
+  outputs:
+  - invoice_ids
+  - invoice_headers
+  checks:
+  - non_empty
+  - grounded_in_tool_results
+  next:
+  - to: collect_facts
+- id: collect_facts
+  type: agent
+  for_each: invoice_ids
+  parallel: 10
+  goal: Collect the facts for this one invoice from the invoice tools.
+  inputs:
+  - item
+  - period
+  tools:
+  - get_invoice
+  - get_purchase_order
+  - get_deliveries
+  instructions: Call get_invoice with the invoice_id, then get_purchase_order with
+    the po_ref from the invoice, then get_deliveries for that PO. Copy values exactly
+    as the tools return them. If get_purchase_order says not found, set po_found to
+    false and leave po_lines empty. If get_deliveries says none found, leave delivered
+    empty. Never guess or fill in a value.
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - invoice_id
+    - supplier
+    - number
+    - date
+    - po_id
+    - inv_lines
+    - tax
+    - total
+    - po_found
+    - po_lines
+    - delivered
+    properties:
+      invoice_id:
+        type: string
+      supplier:
+        type: string
+      number:
+        type: string
+      date:
+        type: string
+      po_id:
+        type: string
+      inv_lines:
+        type: array
+        items:
+          type: object
+          required:
+          - sku
+          - qty
+          - unit_price
+          properties:
+            sku:
+              type: string
+            qty:
+              type: number
+            unit_price:
+              type: number
+      tax:
+        type: number
+      total:
+        type: number
+      po_found:
+        type: boolean
+      po_lines:
+        type: array
+        items:
+          type: object
+          required:
+          - sku
+          - qty
+          - unit_price
+          properties:
+            sku:
+              type: string
+            qty:
+              type: number
+            unit_price:
+              type: number
+      delivered:
+        type: array
+        items:
+          type: object
+          required:
+          - sku
+          - qty
+          properties:
+            sku:
+              type: string
+            qty:
+              type: number
+  outputs:
+  - facts
+  checks:
+  - schema
+  - grounded_in_tool_results
+  - every_invoice_has_facts
+  next:
+  - to: gate_facts
+- id: gate_facts
+  type: branch
+  goal: Continue only if every invoice produced facts.
+  inputs:
+  - facts
+  outputs: []
+  checks: []
+  next:
+  - to: write_facts_file
+    label: all collected
+  - to: report_summary
+    label: some missing
+- id: write_facts_file
+  type: tool
+  tool: write_file
+  goal: Write the collected facts to a JSON file for the decide script.
+  inputs:
+  - facts
+  outputs:
+  - facts_path
+  checks:
+  - non_empty
+  - facts_file_matches_facts
+  next:
+  - to: gate_script
+- id: gate_script
+  type: branch
+  goal: Get human approval before writing or running the decide script.
+  inputs:
+  - facts_path
+  - period
+  outputs: []
+  checks:
+  - user_approves_decide_script
+  next:
+  - to: write_decide_script
+    label: approved
+  - to: report_summary
+    label: rejected
+- id: write_decide_script
+  type: tool
+  tool: terminal
+  goal: Write the decide script that turns each fact row into a verdict.
+  inputs:
+  - period
+  outputs:
+  - script_path
+  checks:
+  - non_empty
+  next:
+  - to: run_decide
+- id: run_decide
+  type: tool
+  tool: terminal
+  goal: Run the decide script on the facts file for the period.
+  inputs:
+  - script_path
+  - facts_path
+  - period
+  outputs:
+  - verdicts
+  checks:
+  - non_empty
+  - verdicts_cover_all_invoices
+  next:
+  - to: select_matched
+- id: select_matched
+  type: code
+  goal: Split verdicts into matched invoices (verdict ok) and exceptions.
+  inputs:
+  - verdicts
+  - facts
+  outputs:
+  - matched
+  checks:
+  - verdicts_cover_all_invoices
+  next:
+  - to: gate_drafts
+- id: gate_drafts
+  type: branch
+  goal: Get human approval before creating draft bills.
+  inputs:
+  - matched
+  outputs: []
+  checks:
+  - user_approves_drafts
+  next:
+  - to: create_drafts
+    label: approved
+  - to: report_summary
+    label: rejected
+- id: create_drafts
+  type: agent
+  for_each: matched
+  parallel: 5
+  goal: Create one draft bill for this matched invoice.
+  inputs:
+  - item
+  tools:
+  - create_draft_bill
+  instructions: Call create_draft_bill once with the invoice_id, po_id and total of
+    this item. Copy the returned draft_id exactly. Never create a second draft for
+    the same invoice.
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - draft_id
+    - invoice_id
+    - po_id
+    - total
+    properties:
+      draft_id:
+        type: string
+      invoice_id:
+        type: string
+      po_id:
+        type: string
+      total:
+        type: number
+  outputs:
+  - draft_bills
+  checks:
+  - schema
+  - grounded_in_tool_results
+  - every_matched_has_draft
+  next:
+  - to: verify_drafts
+- id: verify_drafts
+  type: agent
+  for_each: draft_bills
+  parallel: 5
+  goal: Read back this draft bill and confirm it matches what was requested.
+  inputs:
+  - item
+  tools:
+  - get_draft_bill
+  instructions: Call get_draft_bill with the draft_id. Compare invoice_id, po_id and
+    total with the item. Report matches as true only if all three are equal.
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - draft_id
+    - invoice_id
+    - po_id
+    - total
+    - matches
+    properties:
+      draft_id:
+        type: string
+      invoice_id:
+        type: string
+      po_id:
+        type: string
+      total:
+        type: number
+      matches:
+        type: boolean
+  outputs:
+  - verified_drafts
+  checks:
+  - schema
+  - grounded_in_tool_results
+  - draft_matches_request
+  next:
+  - to: report_summary
+- id: report_summary
+  type: code
+  goal: Build the final report of matched invoices with draft ids and exceptions with
+    reasons; on a rejected or incomplete path, report only what exists.
+  inputs:
+  - verdicts
+  - verified_drafts
+  - facts
+  outputs:
+  - final_report
+  checks:
+  - final_report_covers_all_invoices
+  - non_empty
+  next: []

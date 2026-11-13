@@ -1,0 +1,242 @@
+name: process-mailbox-invoices-for-month
+version: 0.1
+goal: Match each supplier invoice in a mailbox folder to its purchase order and deliveries
+  for a given month, reject invoices that fail the rules, and create draft bills for
+  the ones that pass.
+context_policy: fresh context per node; only the declared inputs are passed
+inputs:
+  folder:
+    type: string
+    from: user
+    description: Mailbox folder name in the invoice tools, for example F05
+  month:
+    type: string
+    from: user
+    description: Invoice period as YYYY-MM, for example 2026-10
+tools_provided:
+- list_invoices
+- get_invoice
+- get_purchase_order
+- get_deliveries
+- create_draft_bill
+- get_draft_bill
+check_descriptions:
+  user_approves_run: The user has explicitly approved writing the decision script
+    and running it on the collected facts.
+  user_approves_drafts: The user has explicitly approved creating draft bills for
+    the invoices that passed every rule.
+  script_implements_rules: The written script returns out_of_period, duplicate, arithmetic_error,
+    missing_po, price_mismatch (unit price differs by more than 1 percent), quantity_exceeds_delivery,
+    or ok for each invoice, in that order of precedence.
+  every_invoice_has_facts: The facts list has exactly one entry per invoice returned
+    by list_invoices for the folder.
+  verdicts_cover_all_invoices: The verdicts list has exactly one verdict per invoice
+    in facts, and each invoice appears either in ok_invoices or in exceptions, not
+    both.
+  every_invoice_accounted_for: The final report lists every input invoice exactly
+    once, either as matched with a draft_id or as an exception with a reason.
+nodes:
+- id: list_folder
+  type: tool
+  tool: list_invoices
+  goal: List the invoices in the mailbox folder.
+  inputs:
+  - folder
+  outputs:
+  - invoices
+  checks:
+  - non_empty
+  next:
+  - to: fetch_invoice
+- id: fetch_invoice
+  type: tool
+  tool: get_invoice
+  for_each: invoices
+  goal: Read the full details of one invoice, including its lines, tax, total and
+    po_ref.
+  inputs:
+  - item
+  outputs:
+  - invoice_details
+  checks:
+  - non_empty
+  next:
+  - to: fetch_purchase_order
+- id: fetch_purchase_order
+  type: tool
+  tool: get_purchase_order
+  for_each: invoice_details
+  goal: Read the purchase order referenced by one invoice, with its ordered lines
+    and unit prices.
+  inputs:
+  - item
+  outputs:
+  - purchase_orders
+  checks:
+  - non_empty
+  next:
+  - to: fetch_deliveries
+- id: fetch_deliveries
+  type: tool
+  tool: get_deliveries
+  for_each: invoice_details
+  goal: Read the goods receipts recorded against the purchase order of one invoice.
+  inputs:
+  - item
+  outputs:
+  - deliveries
+  checks:
+  - non_empty
+  next:
+  - to: build_facts
+- id: build_facts
+  type: code
+  goal: Combine invoices, purchase orders and deliveries into one facts record per
+    invoice.
+  inputs:
+  - invoice_details
+  - purchase_orders
+  - deliveries
+  outputs:
+  - facts
+  checks:
+  - every_invoice_has_facts
+  next:
+  - to: gate_before_script
+- id: gate_before_script
+  type: branch
+  goal: Ask the user to approve writing and running the decision script before any
+    file is written or any command runs.
+  inputs:
+  - facts
+  - month
+  outputs: []
+  checks:
+  - user_approves_run
+  next:
+  - to: compose_decision_script
+    label: approved
+  - to: report_stopped
+    label: not approved
+- id: compose_decision_script
+  type: agent
+  goal: Write a Python script that applies the matching rules to the facts for the
+    given month.
+  inputs:
+  - month
+  tools:
+  - write_file
+  instructions: 'Write /tmp/decide.py. For each invoice in the facts list, in order:
+    out_of_period if the date does not start with the month; duplicate if the (supplier,
+    number) pair was already seen; arithmetic_error if sum(qty*unit_price) plus tax
+    differs from total by more than 0.005; missing_po if po_found is false; price_mismatch
+    if any invoice unit price differs from the PO unit price by more than 1 percent;
+    quantity_exceeds_delivery if any invoice qty is greater than the total delivered
+    qty for that sku; otherwise ok. Print a JSON list of {invoice_id, verdict}. Do
+    not change the rules.'
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - script_path
+    properties:
+      script_path:
+        type: string
+  outputs:
+  - script_path
+  checks:
+  - schema
+  - non_empty
+  - script_implements_rules
+  next:
+  - to: run_decision
+- id: run_decision
+  type: tool
+  tool: terminal
+  goal: Write the facts to a JSON file, run the decision script on them, and split
+    the results into passing and exception invoices.
+  inputs:
+  - script_path
+  - facts
+  - month
+  outputs:
+  - ok_invoices
+  - exceptions
+  checks:
+  - verdicts_cover_all_invoices
+  next:
+  - to: gate_before_drafts
+- id: gate_before_drafts
+  type: branch
+  goal: Ask the user to approve creating draft bills for the passing invoices before
+    any draft is written.
+  inputs:
+  - ok_invoices
+  - exceptions
+  outputs: []
+  checks:
+  - user_approves_drafts
+  next:
+  - to: create_draft_bills
+    label: approved
+  - to: report_stopped
+    label: not approved
+- id: create_draft_bills
+  type: agent
+  for_each: ok_invoices
+  goal: Create one draft bill for this passing invoice and read it back to confirm.
+  inputs:
+  - item
+  tools:
+  - create_draft_bill
+  - get_draft_bill
+  instructions: Call create_draft_bill with the invoice_id, po_id and total from the
+    item. Then call get_draft_bill with the returned draft_id and confirm the invoice_id,
+    po_id and total match. Copy values exactly as returned; never invent a draft_id.
+  output_schema:
+    type: object
+    additionalProperties: false
+    required:
+    - invoice_id
+    - po_id
+    - total
+    - draft_id
+    properties:
+      invoice_id:
+        type: string
+      po_id:
+        type: string
+      total:
+        type: number
+      draft_id:
+        type: string
+  outputs:
+  - drafts
+  checks:
+  - schema
+  - grounded_in_tool_results
+  next:
+  - to: report_summary
+- id: report_summary
+  type: code
+  goal: Build the final summary of matched invoices with draft ids and the exceptions
+    with reasons.
+  inputs:
+  - drafts
+  - exceptions
+  outputs:
+  - summary
+  checks:
+  - every_invoice_accounted_for
+  next: []
+- id: report_stopped
+  type: code
+  goal: Report that processing stopped at an approval gate and list the facts gathered
+    so far.
+  inputs:
+  - facts
+  outputs:
+  - stop_message
+  checks:
+  - non_empty
+  next: []
