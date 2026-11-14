@@ -1,0 +1,83 @@
+name: collect-invoice-raw-facts
+version: 0.1
+goal: Collect the raw facts for one invoice (invoice header, lines, tax, total) and
+  its purchase order and delivery receipt lines, copied exactly as the invoice tools
+  return them.
+context_policy: fresh context per node; only the declared inputs are passed
+inputs:
+  invoice_id:
+    type: string
+    from: user
+    description: Invoice id to collect, for example T01-INV-04
+tools_provided:
+- get_invoice
+- get_purchase_order
+- get_deliveries
+check_descriptions:
+  po_not_found_handled: If the purchase order tool reported not found, po_found is
+    false and po_lines and delivered are empty; otherwise po_found is true and po_lines
+    and delivered copy the tool's lines exactly, with one delivered entry per receipt
+    line.
+nodes:
+- id: get_invoice
+  type: tool
+  tool: get_invoice
+  goal: Fetch the invoice record for the given invoice id.
+  inputs:
+  - invoice_id
+  outputs:
+  - invoice
+  checks:
+  - non_empty
+  next:
+  - to: read_po_ref
+- id: read_po_ref
+  type: code
+  goal: Take the po_ref field from the invoice record exactly as returned.
+  inputs:
+  - invoice
+  outputs:
+  - po_ref
+  checks:
+  - non_empty
+  next:
+  - to: get_purchase_order
+- id: get_purchase_order
+  type: tool
+  tool: get_purchase_order
+  goal: Fetch the purchase order for the invoice's po_ref.
+  inputs:
+  - po_ref
+  outputs:
+  - purchase_order
+  checks:
+  - non_empty
+  next:
+  - to: get_deliveries
+- id: get_deliveries
+  type: tool
+  tool: get_deliveries
+  goal: Fetch the goods receipt lines recorded against the invoice's po_ref.
+  inputs:
+  - po_ref
+  outputs:
+  - deliveries
+  checks:
+  - non_empty
+  next:
+  - to: assemble_facts
+- id: assemble_facts
+  type: code
+  goal: Combine the invoice, purchase order and deliveries into the raw facts record,
+    setting po_found and the po_lines and delivered lists per the not-found rule.
+  inputs:
+  - invoice
+  - purchase_order
+  - deliveries
+  outputs:
+  - facts
+  checks:
+  - non_empty
+  - po_not_found_handled
+  - grounded_in_tool_results
+  next: []
